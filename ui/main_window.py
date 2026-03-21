@@ -12,7 +12,7 @@ from core.connection import SMBConnectionManager
 from core.file_ops import FileOperations
 from ui.dialogs.connect_dialog import ConnectDialog
 from ui.utils.helpers import format_size, parse_size, parse_date, get_local_drives, sort_items
-from ui.utils.icons import create_icons
+from ui.utils.icons import create_icons, get_file_icon
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD, COPY, ASK
@@ -450,10 +450,11 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                             size = format_size(os.path.getsize(item_path))
                             ext = os.path.splitext(item)[1].upper()[1:] if "." in item else ""
                             mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                            file_icon = get_file_icon(self.icons, item)
                             self.local_file_list.insert("", "end", text=item,
                                                          values=(item, size, ext or "文件", mod_time),
                                                          tags=("file",),
-                                                         image=self.icons['file'])
+                                                         image=file_icon)
                             file_count += 1
                     except:
                         pass
@@ -643,10 +644,11 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 else:
                     size = format_size(file.file_size)
                     ext = os.path.splitext(filename)[1].upper()[1:] if "." in filename else ""
+                    file_icon = get_file_icon(self.icons, filename)
                     self.remote_file_list.insert("", "end", text=filename,
                                                   values=(filename, size, ext or "文件", mod_time),
                                                   tags=("file",),
-                                                  image=self.icons['file'])
+                                                  image=file_icon)
 
             self.remote_file_list.tag_configure("dir", foreground="#0078d4")
             self.remote_file_list.tag_configure("file", foreground="black")
