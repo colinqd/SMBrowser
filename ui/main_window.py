@@ -201,12 +201,15 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         local_paned.add(local_list_frame, weight=2)
 
         self.local_file_list = ttk.Treeview(local_list_frame,
-                                             columns=("Name", "Size", "Type", "Modified"),
+                                             columns=("Size", "Type", "Modified"),
                                              show="tree headings", selectmode="extended")
         self.local_file_list.pack(side="left", fill="both", expand=True)
 
+        self.local_file_list.heading("#0", text="名称", anchor="w", 
+                                      command=lambda: self.sort_local_file_list("#0"))
+        self.local_file_list.column("#0", width=200, anchor="w")
+
         local_columns = [
-            {"id": "Name", "text": "名称", "width": 200, "anchor": "w"},
             {"id": "Size", "text": "大小", "width": 80, "anchor": "e"},
             {"id": "Type", "text": "类型", "width": 80, "anchor": "center"},
             {"id": "Modified", "text": "修改日期", "width": 140, "anchor": "center"}
@@ -252,12 +255,15 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         remote_paned.add(remote_list_frame, weight=2)
 
         self.remote_file_list = ttk.Treeview(remote_list_frame,
-                                              columns=("Name", "Size", "Type", "Modified"),
+                                              columns=("Size", "Type", "Modified"),
                                               show="tree headings", selectmode="extended")
         self.remote_file_list.pack(side="left", fill="both", expand=True)
 
+        self.remote_file_list.heading("#0", text="名称", anchor="w",
+                                       command=lambda: self.sort_remote_file_list("#0"))
+        self.remote_file_list.column("#0", width=200, anchor="w")
+
         remote_columns = [
-            {"id": "Name", "text": "名称", "width": 200, "anchor": "w"},
             {"id": "Size", "text": "大小", "width": 80, "anchor": "e"},
             {"id": "Type", "text": "类型", "width": 80, "anchor": "center"},
             {"id": "Modified", "text": "修改日期", "width": 140, "anchor": "center"}
@@ -435,7 +441,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                         if os.path.isdir(item_path):
                             mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
                             self.local_file_list.insert("", "end", text=item,
-                                                         values=(item, "", "文件夹", mod_time),
+                                                         values=("", "文件夹", mod_time),
                                                          tags=("dir",),
                                                          image=self.icons['folder'])
                             file_count += 1
@@ -452,7 +458,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                             mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
                             file_icon = get_file_icon(self.icons, item)
                             self.local_file_list.insert("", "end", text=item,
-                                                         values=(item, size, ext or "文件", mod_time),
+                                                         values=(size, ext or "文件", mod_time),
                                                          tags=("file",),
                                                          image=file_icon)
                             file_count += 1
@@ -638,7 +644,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
                 if file.isDirectory:
                     self.remote_file_list.insert("", "end", text=filename,
-                                                  values=(filename, "", "文件夹", mod_time),
+                                                  values=("", "文件夹", mod_time),
                                                   tags=("dir",),
                                                   image=self.icons['folder'])
                 else:
@@ -646,7 +652,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                     ext = os.path.splitext(filename)[1].upper()[1:] if "." in filename else ""
                     file_icon = get_file_icon(self.icons, filename)
                     self.remote_file_list.insert("", "end", text=filename,
-                                                  values=(filename, size, ext or "文件", mod_time),
+                                                  values=(size, ext or "文件", mod_time),
                                                   tags=("file",),
                                                   image=file_icon)
 
@@ -816,8 +822,12 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.local_sorted_column = col
             self.local_sort_reverse = False
 
-        items = [(self.local_file_list.set(child, col), child)
-                 for child in self.local_file_list.get_children('')]
+        if col == "#0":
+            items = [(self.local_file_list.item(child, "text"), child)
+                     for child in self.local_file_list.get_children('')]
+        else:
+            items = [(self.local_file_list.set(child, col), child)
+                     for child in self.local_file_list.get_children('')]
 
         sort_items(self.local_file_list, items, col, self.local_sort_reverse)
         self.update_local_sort_indicator()
@@ -829,14 +839,18 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.remote_sorted_column = col
             self.remote_sort_reverse = False
 
-        items = [(self.remote_file_list.set(child, col), child)
-                 for child in self.remote_file_list.get_children('')]
+        if col == "#0":
+            items = [(self.remote_file_list.item(child, "text"), child)
+                     for child in self.remote_file_list.get_children('')]
+        else:
+            items = [(self.remote_file_list.set(child, col), child)
+                     for child in self.remote_file_list.get_children('')]
 
         sort_items(self.remote_file_list, items, col, self.remote_sort_reverse)
         self.update_remote_sort_indicator()
 
     def update_local_sort_indicator(self):
-        for col in self.local_file_list["columns"]:
+        for col in ["#0"] + list(self.local_file_list["columns"]):
             text = self.local_file_list.heading(col)["text"]
             text = text.replace(" ↑", "").replace(" ↓", "")
 
@@ -847,7 +861,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 self.local_file_list.heading(col, text=text)
 
     def update_remote_sort_indicator(self):
-        for col in self.remote_file_list["columns"]:
+        for col in ["#0"] + list(self.remote_file_list["columns"]):
             text = self.remote_file_list.heading(col)["text"]
             text = text.replace(" ↑", "").replace(" ↓", "")
 
