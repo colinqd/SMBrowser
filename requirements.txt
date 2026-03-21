@@ -1,0 +1,3 @@
+pysmb
+tkinterdnd2
+pywin32
