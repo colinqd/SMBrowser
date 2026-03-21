@@ -10,39 +10,54 @@ import re
 import sys
 import queue
 import time
+import base64
+from io import BytesIO
 from typing import Optional, Dict, List, Tuple, Any
 
 try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
+    from tkinterdnd2 import DND_FILES, TkinterDnD, COPY, ASK
     DND_SUPPORT = True
 except ImportError:
     DND_SUPPORT = False
+    COPY = None
+    ASK = None
 
 
 class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("SMB文件管理器")
-        self.geometry("1280x720")
-        self.minsize(800, 600)
+        self.geometry("1400x800")
+        self.minsize(1000, 600)
         
         self.conn: Optional[SMBConnection] = None
         self.current_share: str = ""
-        self.current_path: str = "/"
+        self.remote_path: str = "/"
+        self.local_path: str = os.path.expanduser("~")
         self.current_server_ip: str = ""
         self.servers: Dict = self.load_servers()
-        self.tree_nodes: Dict[str, str] = {}
-        self.dragged_item: Optional[str] = None
-        self.sorted_column: str = ""
-        self.sort_reverse: bool = False
+        self.remote_tree_nodes: Dict[str, str] = {}
+        self.local_tree_nodes: Dict[str, str] = {}
+        self.local_sorted_column: str = "Name"
+        self.local_sort_reverse: bool = False
+        self.remote_sorted_column: str = "Name"
+        self.remote_sort_reverse: bool = False
         self.task_queue: queue.Queue = queue.Queue()
         self.is_connected: bool = False
         self.available_shares: List[str] = []
         
         self.setup_style()
+        self.create_icons()
         self.create_widgets()
+        self.init_local_browser()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.process_tasks()
+        
+        if DND_SUPPORT:
+            self.setup_drag_drop()
+        
+        self.update_local_sort_indicator()
+        self.update_remote_sort_indicator()
 
     def setup_style(self):
         style = ttk.Style()
@@ -57,25 +72,105 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 except:
                     pass
         
-        style.configure("Toolbar.TButton", padding=(8, 4), relief="raised", font=('Segoe UI', 9))
-        style.map("Toolbar.TButton", 
-                 relief=[('pressed', 'sunken'), ('active', 'raised')])
-        style.configure("Path.TEntry", padding=4, font=('Segoe UI', 9))
-        style.configure("Status.TLabel", padding=2, font=('Segoe UI', 8))
-        style.configure("Treeview", font=('Segoe UI', 9), rowheight=22)
-        style.configure("Treeview.Heading", font=('Segoe UI', 9, 'bold'))
+        style.configure("Treeview", 
+                       font=('Segoe UI', 9), 
+                       rowheight=24,
+                       background="#ffffff",
+                       foreground="#000000",
+                       fieldbackground="#ffffff")
+        style.configure("Treeview.Heading", 
+                       font=('Segoe UI', 9, 'bold'),
+                       background="#f0f0f0",
+                       foreground="#000000")
+        style.map("Treeview",
+                  background=[('selected', '#0078d4')],
+                  foreground=[('selected', '#ffffff')])
         style.configure("TLabelframe", font=('Segoe UI', 9))
         style.configure("TButton", font=('Segoe UI', 9))
         style.configure("TLabel", font=('Segoe UI', 9))
         style.configure("TEntry", font=('Segoe UI', 9))
         style.configure("TCombobox", font=('Segoe UI', 9))
+        style.configure("Status.TLabel", padding=2, font=('Segoe UI', 8))
         
-        self.configure(bg="#ffffff")
+        self.configure(bg="#f0f0f0")
+
+    def create_icons(self):
+        from PIL import Image, ImageDraw, ImageColor
+        
+        def create_folder_icon(size=16):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            folder_color = '#FFD700'
+            darker_color = '#DAA520'
+            
+            draw.rectangle([2, 5, size-2, size-2], fill=folder_color, outline=darker_color)
+            draw.rectangle([2, 3, size-6, 6], fill=darker_color, outline=darker_color)
+            
+            return img
+        
+        def create_file_icon(size=16):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            paper_color = '#FFFFFF'
+            line_color = '#808080'
+            corner_color = '#E0E0E0'
+            
+            draw.rectangle([3, 1, size-4, size-2], fill=paper_color, outline=line_color)
+            draw.polygon([size-7, 1, size-4, 1, size-4, 5, size-7, 5], fill=corner_color, outline=line_color)
+            draw.line([size-7, 1, size-4, 4], fill=line_color)
+            
+            draw.line([6, 7, size-7, 7], fill=line_color)
+            draw.line([6, 10, size-7, 10], fill=line_color)
+            draw.line([6, 13, size-10, 13], fill=line_color)
+            
+            return img
+        
+        def create_drive_icon(size=16):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            drive_color = '#A0A0A0'
+            outline_color = '#606060'
+            
+            draw.rectangle([2, 4, size-2, size-3], fill=drive_color, outline=outline_color)
+            draw.rectangle([4, 2, size-4, 5], fill=drive_color, outline=outline_color)
+            draw.rectangle([6, size-5, size-8, size-3], fill='#303030')
+            
+            return img
+        
+        def create_server_icon(size=16):
+            img = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            
+            box_color = '#4A90D9'
+            outline_color = '#2E5B8A'
+            
+            draw.rectangle([2, 3, size-2, size-3], fill=box_color, outline=outline_color)
+            draw.rectangle([4, 5, size-4, 8], fill='#FFFFFF')
+            draw.rectangle([4, 10, size-4, 13], fill='#FFFFFF')
+            
+            return img
+        
+        def img_to_photo(img):
+            with BytesIO() as output:
+                img.save(output, format='PNG')
+                data = output.getvalue()
+            return tk.PhotoImage(data=base64.b64encode(data))
+        
+        self.icons = {
+            'folder': img_to_photo(create_folder_icon(16)),
+            'file': img_to_photo(create_file_icon(16)),
+            'drive': img_to_photo(create_drive_icon(16)),
+            'server': img_to_photo(create_server_icon(16)),
+            'share': img_to_photo(create_folder_icon(16))
+        }
 
     def create_widgets(self):
         self.create_menubar()
         self.create_toolbar()
-        self.create_path_bar()
+        self.create_path_bars()
         self.create_main_panes()
         self.create_status_bar()
         self.create_log_area()
@@ -90,10 +185,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         menubar.add_cascade(label="文件", menu=file_menu)
         
         view_menu = Menu(menubar, tearoff=0)
-        view_menu.add_command(label="刷新", command=self.refresh_files, accelerator="F5")
-        view_menu.add_separator()
-        view_menu.add_command(label="大图标", command=lambda: self.set_view_mode("large"))
-        view_menu.add_command(label="详细信息", command=lambda: self.set_view_mode("details"))
+        view_menu.add_command(label="刷新", command=self.refresh_all, accelerator="F5")
         menubar.add_cascade(label="查看", menu=view_menu)
         
         help_menu = Menu(menubar, tearoff=0)
@@ -102,102 +194,198 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         
         self.config(menu=menubar)
         
-        self.bind("<F5>", lambda e: self.refresh_files())
+        self.bind("<F5>", lambda e: self.refresh_all())
         self.bind("<Control-n>", lambda e: self.show_connect_dialog())
 
     def create_toolbar(self):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", padx=5, pady=2)
         
-        self.btn_back = ttk.Button(toolbar, text="← 后退", command=self.go_up)
-        self.btn_back.pack(side="left", padx=2)
-        self.btn_back.state(["disabled"])
+        ttk.Button(toolbar, text="新建", command=self.create_folder).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="上传", command=self.upload_from_local).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="下载", command=self.download_to_local).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="删除", command=self.delete_remote_items).pack(side="left", padx=2)
         
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
         
-        ttk.Button(toolbar, text="📁 新建文件夹", command=self.create_folder).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="📤 上传文件", command=self.upload_file).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="📥 下载选中", command=self.download_selected_files).pack(side="left", padx=2)
-        ttk.Button(toolbar, text="🗑️ 删除", command=self.delete_selected_items).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="刷新", command=self.refresh_all).pack(side="left", padx=2)
         
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
         
-        ttk.Button(toolbar, text="🔄 刷新", command=self.refresh_files).pack(side="left", padx=2)
-        
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
-        
-        self.conn_status_label = ttk.Label(toolbar, text="🔴 未连接", foreground="red")
+        self.conn_status_label = ttk.Label(toolbar, text="未连接", foreground="red")
         self.conn_status_label.pack(side="right", padx=10)
 
-    def create_path_bar(self):
+    def create_path_bars(self):
         path_frame = ttk.Frame(self)
-        path_frame.pack(fill="x", padx=10, pady=2)
+        path_frame.pack(fill="x", padx=5, pady=2)
         
-        ttk.Label(path_frame, text="路径:").pack(side="left")
+        left_path_frame = ttk.Frame(path_frame)
+        left_path_frame.pack(side="left", fill="x", expand=True, padx=(0, 2))
         
-        self.path_entry = ttk.Entry(path_frame, style="Path.TEntry")
-        self.path_entry.pack(side="left", fill="x", expand=True, padx=5)
-        self.path_entry.bind("<Return>", self.on_path_enter)
+        ttk.Label(left_path_frame, text="本地:").pack(side="left")
+        ttk.Button(left_path_frame, text="↑", width=4, command=self.go_local_up).pack(side="left", padx=(2, 0))
+        self.local_path_entry = ttk.Entry(left_path_frame)
+        self.local_path_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.local_path_entry.bind("<Return>", self.on_local_path_enter)
         
-        self.btn_connect = ttk.Button(path_frame, text="连接服务器", command=self.show_connect_dialog)
+        right_path_frame = ttk.Frame(path_frame)
+        right_path_frame.pack(side="right", fill="x", expand=True, padx=(2, 0))
+        
+        ttk.Label(right_path_frame, text="远程:").pack(side="left")
+        ttk.Button(right_path_frame, text="↑", width=4, command=self.go_remote_up).pack(side="left", padx=(2, 0))
+        self.remote_path_entry = ttk.Entry(right_path_frame)
+        self.remote_path_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.remote_path_entry.bind("<Return>", self.on_remote_path_enter)
+        
+        self.btn_connect = ttk.Button(right_path_frame, text="连接服务器", command=self.show_connect_dialog)
         self.btn_connect.pack(side="left", padx=5)
 
     def create_main_panes(self):
         main_paned = ttk.PanedWindow(self, orient="horizontal")
-        main_paned.pack(fill="both", expand=True, padx=10, pady=5)
+        main_paned.pack(fill="both", expand=True, padx=5, pady=5)
         
-        left_frame = ttk.LabelFrame(main_paned, text="📁 文件夹")
+        left_frame = ttk.LabelFrame(main_paned, text="本地文件")
         main_paned.add(left_frame, weight=1)
         
-        self.tree_dir = ttk.Treeview(left_frame, show="tree", selectmode="browse")
-        self.tree_dir.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.create_local_panel(left_frame)
         
-        tree_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree_dir.yview)
-        tree_scroll.pack(side="right", fill="y")
-        self.tree_dir.configure(yscrollcommand=tree_scroll.set)
+        right_frame = ttk.LabelFrame(main_paned, text="远程文件 (SMB)")
+        main_paned.add(right_frame, weight=1)
         
-        self.tree_dir.bind("<<TreeviewOpen>>", self.on_tree_expand)
-        self.tree_dir.bind("<<TreeviewSelect>>", self.on_tree_select)
-        self.tree_dir.bind("<Button-3>", self.show_tree_context_menu)
+        self.create_remote_panel(right_frame)
+
+    def create_local_panel(self, parent):
+        local_paned = ttk.PanedWindow(parent, orient="horizontal")
+        local_paned.pack(fill="both", expand=True, padx=5, pady=5)
         
-        right_frame = ttk.LabelFrame(main_paned, text="📄 文件列表")
-        main_paned.add(right_frame, weight=4)
+        local_tree_frame = ttk.Frame(local_paned)
+        local_paned.add(local_tree_frame, weight=1)
         
-        self.file_list = ttk.Treeview(right_frame, 
-                                     columns=("Name", "Size", "Type", "Modified"),
-                                     show="headings", selectmode="extended")
-        self.file_list.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.local_tree = ttk.Treeview(local_tree_frame, show="tree", selectmode="browse")
+        self.local_tree.pack(side="left", fill="both", expand=True)
         
-        columns = [
-            {"id": "Name", "text": "名称", "width": 350, "anchor": "w"},
-            {"id": "Size", "text": "大小", "width": 100, "anchor": "e"},
-            {"id": "Type", "text": "类型", "width": 100, "anchor": "center"},
-            {"id": "Modified", "text": "修改日期", "width": 160, "anchor": "center"}
+        local_tree_scroll = ttk.Scrollbar(local_tree_frame, orient="vertical", command=self.local_tree.yview)
+        local_tree_scroll.pack(side="right", fill="y")
+        self.local_tree.configure(yscrollcommand=local_tree_scroll.set)
+        
+        self.local_tree.bind("<<TreeviewOpen>>", self.on_local_tree_expand)
+        self.local_tree.bind("<<TreeviewSelect>>", self.on_local_tree_select)
+        
+        local_list_frame = ttk.Frame(local_paned)
+        local_paned.add(local_list_frame, weight=2)
+        
+        self.local_file_list = ttk.Treeview(local_list_frame, 
+                                             columns=("Name", "Size", "Type", "Modified"),
+                                             show="headings", selectmode="extended")
+        self.local_file_list.pack(side="left", fill="both", expand=True)
+        
+        local_columns = [
+            {"id": "Name", "text": "名称", "width": 200, "anchor": "w"},
+            {"id": "Size", "text": "大小", "width": 80, "anchor": "e"},
+            {"id": "Type", "text": "类型", "width": 80, "anchor": "center"},
+            {"id": "Modified", "text": "修改日期", "width": 140, "anchor": "center"}
         ]
         
-        for col in columns:
-            self.file_list.heading(
-                col["id"],
-                text=col["text"],
+        for col in local_columns:
+            self.local_file_list.heading(
+                col["id"], 
+                text=col["text"], 
                 anchor=col["anchor"],
-                command=lambda c=col["id"]: self.sort_file_list(c)
+                command=lambda c=col["id"]: self.sort_local_file_list(c)
             )
-            self.file_list.column(
-                col["id"],
-                width=col["width"],
-                anchor=col["anchor"]
+            self.local_file_list.column(col["id"], width=col["width"], anchor=col["anchor"])
+        
+        local_scroll_y = ttk.Scrollbar(local_list_frame, orient="vertical", command=self.local_file_list.yview)
+        local_scroll_y.pack(side="right", fill="y")
+        local_scroll_x = ttk.Scrollbar(local_list_frame, orient="horizontal", command=self.local_file_list.xview)
+        local_scroll_x.pack(side="bottom", fill="x")
+        self.local_file_list.configure(yscrollcommand=local_scroll_y.set, xscrollcommand=local_scroll_x.set)
+        
+        self.local_file_list.bind("<Double-1>", self.on_local_file_double_click)
+        self.local_file_list.bind("<Return>", lambda e: self.on_local_file_double_click(e))
+        self.local_file_list.bind("<Button-3>", self.show_local_context_menu)
+
+    def create_remote_panel(self, parent):
+        remote_paned = ttk.PanedWindow(parent, orient="horizontal")
+        remote_paned.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        remote_tree_frame = ttk.Frame(remote_paned)
+        remote_paned.add(remote_tree_frame, weight=1)
+        
+        self.remote_tree = ttk.Treeview(remote_tree_frame, show="tree", selectmode="browse")
+        self.remote_tree.pack(side="left", fill="both", expand=True)
+        
+        remote_tree_scroll = ttk.Scrollbar(remote_tree_frame, orient="vertical", command=self.remote_tree.yview)
+        remote_tree_scroll.pack(side="right", fill="y")
+        self.remote_tree.configure(yscrollcommand=remote_tree_scroll.set)
+        
+        self.remote_tree.bind("<<TreeviewOpen>>", self.on_remote_tree_expand)
+        self.remote_tree.bind("<<TreeviewSelect>>", self.on_remote_tree_select)
+        
+        remote_list_frame = ttk.Frame(remote_paned)
+        remote_paned.add(remote_list_frame, weight=2)
+        
+        self.remote_file_list = ttk.Treeview(remote_list_frame, 
+                                              columns=("Name", "Size", "Type", "Modified"),
+                                              show="headings", selectmode="extended")
+        self.remote_file_list.pack(side="left", fill="both", expand=True)
+        
+        remote_columns = [
+            {"id": "Name", "text": "名称", "width": 200, "anchor": "w"},
+            {"id": "Size", "text": "大小", "width": 80, "anchor": "e"},
+            {"id": "Type", "text": "类型", "width": 80, "anchor": "center"},
+            {"id": "Modified", "text": "修改日期", "width": 140, "anchor": "center"}
+        ]
+        
+        for col in remote_columns:
+            self.remote_file_list.heading(
+                col["id"], 
+                text=col["text"], 
+                anchor=col["anchor"],
+                command=lambda c=col["id"]: self.sort_remote_file_list(c)
             )
+            self.remote_file_list.column(col["id"], width=col["width"], anchor=col["anchor"])
         
-        file_scroll_y = ttk.Scrollbar(right_frame, orient="vertical", command=self.file_list.yview)
-        file_scroll_y.pack(side="right", fill="y")
-        file_scroll_x = ttk.Scrollbar(right_frame, orient="horizontal", command=self.file_list.xview)
-        file_scroll_x.pack(side="bottom", fill="x")
-        self.file_list.configure(yscrollcommand=file_scroll_y.set, xscrollcommand=file_scroll_x.set)
+        remote_scroll_y = ttk.Scrollbar(remote_list_frame, orient="vertical", command=self.remote_file_list.yview)
+        remote_scroll_y.pack(side="right", fill="y")
+        remote_scroll_x = ttk.Scrollbar(remote_list_frame, orient="horizontal", command=self.remote_file_list.xview)
+        remote_scroll_x.pack(side="bottom", fill="x")
+        self.remote_file_list.configure(yscrollcommand=remote_scroll_y.set, xscrollcommand=remote_scroll_x.set)
         
-        self.file_list.bind("<Button-3>", self.show_file_context_menu)
-        self.file_list.bind("<Double-1>", self.on_file_double_click)
-        self.file_list.bind("<Return>", lambda e: self.on_file_double_click(e))
-        self.file_list.bind("<Delete>", lambda e: self.delete_selected_items())
+        self.remote_file_list.bind("<Double-1>", self.on_remote_file_double_click)
+        self.remote_file_list.bind("<Return>", lambda e: self.on_remote_file_double_click(e))
+        self.remote_file_list.bind("<Delete>", lambda e: self.delete_remote_items())
+        self.remote_file_list.bind("<Button-3>", self.show_remote_context_menu)
+
+    def setup_drag_drop(self):
+        if not DND_SUPPORT:
+            return
+        
+        self._local_dragging = False
+        self._remote_dragging = False
+        
+        self.remote_file_list.drop_target_register(DND_FILES)
+        self.remote_file_list.dnd_bind('<<Drop>>', self.on_drop_to_remote)
+        self.remote_file_list.dnd_bind('<<DropEnter>>', self.on_drop_enter)
+        self.remote_file_list.dnd_bind('<<DropPosition>>', self.on_drop_position)
+        self.remote_file_list.dnd_bind('<<DropLeave>>', self.on_drop_leave)
+        
+        self.local_file_list.drop_target_register(DND_FILES)
+        self.local_file_list.dnd_bind('<<Drop>>', self.on_drop_to_local)
+        self.local_file_list.dnd_bind('<<DropEnter>>', self.on_drop_enter)
+        self.local_file_list.dnd_bind('<<DropPosition>>', self.on_drop_position)
+        self.local_file_list.dnd_bind('<<DropLeave>>', self.on_drop_leave)
+        
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind('<<Drop>>', self.on_external_drop)
+        
+        self.local_file_list.drag_source_register(1, DND_FILES)
+        self.local_file_list.dnd_bind('<<DragInitCmd>>', self.on_local_drag_init)
+        self.local_file_list.dnd_bind('<<DragEndCmd>>', self.on_local_drag_end)
+        
+        self.remote_file_list.drag_source_register(1, DND_FILES)
+        self.remote_file_list.dnd_bind('<<DragInitCmd>>', self.on_remote_drag_init)
+        self.remote_file_list.dnd_bind('<<DragEndCmd>>', self.on_remote_drag_end)
 
     def create_status_bar(self):
         status_frame = ttk.Frame(self)
@@ -208,16 +396,20 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                                       relief="sunken", anchor="w", style="Status.TLabel")
         self.status_label.pack(side="left", fill="x", expand=True, padx=2)
         
-        self.item_count_var = tk.StringVar(value="0 个项目")
-        ttk.Label(status_frame, textvariable=self.item_count_var, 
+        self.local_count_var = tk.StringVar(value="本地: 0 个项目")
+        ttk.Label(status_frame, textvariable=self.local_count_var, 
+                 relief="sunken", anchor="e").pack(side="left", padx=5)
+        
+        self.remote_count_var = tk.StringVar(value="远程: 0 个项目")
+        ttk.Label(status_frame, textvariable=self.remote_count_var, 
                  relief="sunken", anchor="e").pack(side="right", padx=2)
 
     def create_log_area(self):
         self.log_toggle = ttk.Button(self, text="▼ 显示日志", command=self.toggle_log)
-        self.log_toggle.pack(fill="x", padx=10, pady=(0, 5))
+        self.log_toggle.pack(fill="x", padx=5, pady=(0, 5))
         
         self.log_frame = ttk.LabelFrame(self, text="操作日志")
-        self.log_frame.pack(fill="both", expand=True, padx=10, pady=(0, 5))
+        self.log_frame.pack(fill="both", expand=True, padx=5, pady=(0, 5))
         self.log_frame.pack_forget()
         
         self.log_area = scrolledtext.ScrolledText(self.log_frame, height=6, state="disabled")
@@ -229,7 +421,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.log_visible = not self.log_visible
         if self.log_visible:
             self.log_toggle.config(text="▲ 隐藏日志")
-            self.log_frame.pack(after=self.log_toggle, fill="both", expand=True, padx=10, pady=(0, 5))
+            self.log_frame.pack(after=self.log_toggle, fill="both", expand=True, padx=5, pady=(0, 5))
         else:
             self.log_toggle.config(text="▼ 显示日志")
             self.log_frame.pack_forget()
@@ -247,11 +439,578 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
     def update_connection_status(self, connected: bool):
         self.is_connected = connected
         if connected:
-            self.conn_status_label.config(text="🟢 已连接", foreground="green")
+            self.conn_status_label.config(text="已连接", foreground="green")
             self.btn_connect.config(text="断开连接", command=self.disconnect)
         else:
-            self.conn_status_label.config(text="🔴 未连接", foreground="red")
+            self.conn_status_label.config(text="未连接", foreground="red")
             self.btn_connect.config(text="连接服务器", command=self.show_connect_dialog)
+
+    def init_local_browser(self):
+        for item in self.local_tree.get_children():
+            self.local_tree.delete(item)
+        
+        drives = self.get_local_drives()
+        for drive in drives:
+            node_id = self.local_tree.insert("", "end", text=f" {drive}", image=self.icons['drive'], open=False)
+            self.local_tree_nodes[node_id] = drive
+            self.local_tree.insert(node_id, "end", text="Loading...")
+        
+        self.load_local_files(self.local_path)
+
+    def get_local_drives(self):
+        drives = []
+        if sys.platform == 'win32':
+            import ctypes
+            bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+            for i in range(26):
+                if bitmask & (1 << i):
+                    drive = chr(65 + i) + ":\\"
+                    drives.append(drive)
+        else:
+            drives = ["/"]
+        return drives
+
+    def populate_local_tree_node(self, parent_id: str, path: str):
+        try:
+            for child in self.local_tree.get_children(parent_id):
+                self.local_tree.delete(child)
+            
+            if os.path.exists(path):
+                dirs = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+                for d in dirs:
+                    full_path = os.path.join(path, d)
+                    node_id = self.local_tree.insert(parent_id, "end", text=f" {d}", image=self.icons['folder'], tags=("dir",))
+                    self.local_tree_nodes[node_id] = full_path
+                    
+                    try:
+                        os.listdir(full_path)
+                        self.local_tree.insert(node_id, "end", text="Loading...")
+                    except:
+                        pass
+        except Exception as e:
+            self.log_message(f"本地目录访问失败: {path} - {str(e)}")
+
+    def on_local_tree_expand(self, event):
+        node_id = self.local_tree.focus()
+        if node_id and node_id in self.local_tree_nodes:
+            self.populate_local_tree_node(node_id, self.local_tree_nodes[node_id])
+
+    def on_local_tree_select(self, event):
+        selected = self.local_tree.selection()
+        if not selected:
+            return
+        
+        node_id = selected[0]
+        if node_id in self.local_tree_nodes:
+            self.local_path = self.local_tree_nodes[node_id]
+            self.local_path_entry.delete(0, "end")
+            self.local_path_entry.insert(0, self.local_path)
+            self.load_local_files(self.local_path)
+
+    def load_local_files(self, path: str):
+        for item in self.local_file_list.get_children():
+            self.local_file_list.delete(item)
+        
+        file_count = 0
+        try:
+            if os.path.exists(path):
+                items = os.listdir(path)
+                
+                for item in items:
+                    item_path = os.path.join(path, item)
+                    
+                    try:
+                        if os.path.isdir(item_path):
+                            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                            self.local_file_list.insert("", "end", text=item,
+                                                         values=(item, "", "文件夹", mod_time),
+                                                         tags=("dir",),
+                                                         image=self.icons['folder'])
+                            file_count += 1
+                    except:
+                        pass
+                
+                for item in items:
+                    item_path = os.path.join(path, item)
+                    
+                    try:
+                        if os.path.isfile(item_path):
+                            size = self.format_size(os.path.getsize(item_path))
+                            ext = os.path.splitext(item)[1].upper()[1:] if "." in item else ""
+                            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                            self.local_file_list.insert("", "end", text=item,
+                                                         values=(item, size, ext or "文件", mod_time),
+                                                         tags=("file",),
+                                                         image=self.icons['file'])
+                            file_count += 1
+                    except:
+                        pass
+                
+                self.local_file_list.tag_configure("dir", foreground="#0078d4")
+                self.local_file_list.tag_configure("file", foreground="black")
+                
+                if self.local_sorted_column:
+                    self.sort_local_file_list(self.local_sorted_column)
+            
+            self.local_count_var.set(f"本地: {file_count} 个项目")
+        except Exception as e:
+            self.log_message(f"加载本地文件失败: {path} - {str(e)}")
+            self.local_count_var.set(f"本地: 0 个项目")
+
+    def on_local_file_double_click(self, event):
+        item = self.local_file_list.identify_row(event.y) if event else self.local_file_list.selection()
+        if not item:
+            return
+        
+        if isinstance(item, tuple):
+            if not item:
+                return
+            item = item[0]
+        
+        item_data = self.local_file_list.item(item)
+        tags = item_data.get("tags", [])
+        
+        if "dir" in tags:
+            dir_name = item_data["text"].strip()
+            new_path = os.path.join(self.local_path, dir_name)
+            
+            self.local_path = new_path
+            self.local_path_entry.delete(0, "end")
+            self.local_path_entry.insert(0, self.local_path)
+            self.expand_local_tree_to_path(new_path)
+            self.load_local_files(new_path)
+
+    def expand_local_tree_to_path(self, target_path: str):
+        for node_id, node_path in self.local_tree_nodes.items():
+            if node_path == target_path:
+                self.local_tree.selection_set(node_id)
+                self.local_tree.focus(node_id)
+                self.local_tree.see(node_id)
+                
+                parent = self.local_tree.parent(node_id)
+                while parent:
+                    self.local_tree.item(parent, open=True)
+                    parent = self.local_tree.parent(parent)
+                return
+
+    def go_local_up(self):
+        parent_path = os.path.dirname(self.local_path)
+        if parent_path and os.path.exists(parent_path) and parent_path != self.local_path:
+            self.local_path = parent_path
+            self.local_path_entry.delete(0, "end")
+            self.local_path_entry.insert(0, self.local_path)
+            self.expand_local_tree_to_path(self.local_path)
+            self.load_local_files(self.local_path)
+
+    def go_remote_up(self):
+        if not self.remote_path or self.remote_path == "/":
+            return
+        parent_path = os.path.dirname(self.remote_path)
+        if parent_path == "":
+            parent_path = "/"
+        self.remote_path = parent_path
+        self.remote_path_entry.delete(0, "end")
+        self.remote_path_entry.insert(0, f"{self.current_share}:{self.remote_path}")
+        self.expand_remote_tree_to_path(self.remote_path)
+        self.load_remote_files()
+
+    def on_local_path_enter(self, event):
+        path = self.local_path_entry.get()
+        if os.path.exists(path) and os.path.isdir(path):
+            self.local_path = path
+            self.expand_local_tree_to_path(path)
+            self.load_local_files(path)
+
+    def init_remote_browser(self):
+        for item in self.remote_tree.get_children():
+            self.remote_tree.delete(item)
+        self.remote_tree_nodes.clear()
+        
+        root_id = self.remote_tree.insert("", "end", text=f" {self.current_server_ip}", image=self.icons['server'], open=True)
+        self.remote_tree_nodes[root_id] = "//SERVER_ROOT//"
+        
+        for share in self.available_shares:
+            node_id = self.remote_tree.insert(root_id, "end", text=f" {share}", image=self.icons['share'], tags=("share",))
+            self.remote_tree_nodes[node_id] = f"//SHARE//{share}"
+
+    def init_remote_directory_tree(self):
+        for item in self.remote_tree.get_children():
+            self.remote_tree.delete(item)
+        self.remote_tree_nodes.clear()
+        
+        root_id = self.remote_tree.insert("", "end", text=f" {self.current_share}", image=self.icons['share'], open=True)
+        self.remote_tree_nodes[root_id] = "/"
+        
+        self.populate_remote_tree_node(root_id, "/")
+        
+        self.remote_tree.selection_set(root_id)
+        self.remote_tree.focus(root_id)
+        self.on_remote_tree_select(None)
+
+    def populate_remote_tree_node(self, parent_id: str, path: str):
+        if not self.conn or not self.current_share:
+            return
+        
+        try:
+            for child in self.remote_tree.get_children(parent_id):
+                self.remote_tree.delete(child)
+            
+            dirs = [f for f in self.conn.listPath(self.current_share, path)
+                    if f.isDirectory and f.filename not in (".", "..")]
+            
+            for d in dirs:
+                full_path = os.path.join(path, d.filename).replace("\\", "/")
+                
+                if full_path.startswith("//"):
+                    full_path = full_path[2:]
+                if not full_path.startswith("/"):
+                    full_path = "/" + full_path
+                
+                node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", image=self.icons['folder'], tags=("dir",))
+                self.remote_tree_nodes[node_id] = full_path
+                
+                self.remote_tree.insert(node_id, "end", text="Loading...")
+        except NotConnectedError:
+            self.log_message(f"连接已断开，无法访问目录: {path}")
+            self.update_connection_status(False)
+        except Exception as e:
+            self.log_message(f"远程目录访问失败: {path} - {str(e)}")
+
+    def on_remote_tree_expand(self, event):
+        node_id = self.remote_tree.focus()
+        if node_id and self.remote_tree.tag_has("dir", node_id):
+            self.populate_remote_tree_node(node_id, self.remote_tree_nodes[node_id])
+
+    def on_remote_tree_select(self, event):
+        selected = self.remote_tree.selection()
+        if not selected:
+            return
+        
+        node_id = selected[0]
+        node_path = self.remote_tree_nodes.get(node_id, "")
+        
+        if node_path.startswith("//SHARE//"):
+            self.current_share = self.remote_tree.item(node_id, "text").strip()
+            self.remote_path = "/"
+            self.log_message(f"已选择共享: {self.current_share}")
+            self.init_remote_directory_tree()
+            return
+        
+        if node_path and not node_path.startswith("//"):
+            self.remote_path = node_path
+            self.remote_path_entry.delete(0, "end")
+            self.remote_path_entry.insert(0, f"{self.current_share}:{self.remote_path}")
+            self.load_remote_files()
+
+    def load_remote_files(self):
+        for item in self.remote_file_list.get_children():
+            self.remote_file_list.delete(item)
+        
+        if not self.conn or not self.current_share:
+            self.remote_count_var.set("远程: 0 个项目")
+            return
+        
+        try:
+            files = self.conn.listPath(self.current_share, self.remote_path)
+            file_count = 0
+            
+            for file in files:
+                if file.filename in [".", ".."]:
+                    continue
+                
+                file_count += 1
+                filename = file.filename
+                
+                try:
+                    mod_time = datetime.datetime.fromtimestamp(file.last_write_time).strftime("%Y-%m-%d %H:%M")
+                except:
+                    mod_time = "未知"
+                
+                if file.isDirectory:
+                    self.remote_file_list.insert("", "end", text=filename,
+                                                  values=(filename, "", "文件夹", mod_time),
+                                                  tags=("dir",),
+                                                  image=self.icons['folder'])
+                else:
+                    size = self.format_size(file.file_size)
+                    ext = os.path.splitext(filename)[1].upper()[1:] if "." in filename else ""
+                    self.remote_file_list.insert("", "end", text=filename,
+                                                  values=(filename, size, ext or "文件", mod_time),
+                                                  tags=("file",),
+                                                  image=self.icons['file'])
+            
+            self.remote_file_list.tag_configure("dir", foreground="#0078d4")
+            self.remote_file_list.tag_configure("file", foreground="black")
+            
+            if self.remote_sorted_column:
+                self.sort_remote_file_list(self.remote_sorted_column)
+            
+            self.remote_count_var.set(f"远程: {file_count} 个项目")
+            self.update_status(f"{self.current_share}:{self.remote_path}")
+            
+        except NotConnectedError:
+            self.log_message(f"连接已断开，无法访问目录: {self.remote_path}")
+            self.update_connection_status(False)
+            self.remote_count_var.set("远程: 0 个项目")
+        except Exception as e:
+            self.log_message(f"目录访问失败: {self.remote_path} - {str(e)}")
+            self.remote_count_var.set("远程: 0 个项目")
+
+    def on_remote_file_double_click(self, event):
+        item = self.remote_file_list.identify_row(event.y) if event else self.remote_file_list.selection()
+        if not item:
+            return
+        
+        if isinstance(item, tuple):
+            if not item:
+                return
+            item = item[0]
+        
+        item_data = self.remote_file_list.item(item)
+        tags = item_data.get("tags", [])
+        
+        if "dir" in tags:
+            dir_name = item_data["text"].strip()
+            new_path = os.path.join(self.remote_path, dir_name).replace("\\", "/")
+            
+            if new_path.startswith("//"):
+                new_path = new_path[2:]
+            if not new_path.startswith("/"):
+                new_path = "/" + new_path
+            
+            self.remote_path = new_path
+            self.remote_path_entry.delete(0, "end")
+            self.remote_path_entry.insert(0, f"{self.current_share}:{self.remote_path}")
+            self.log_message(f"进入目录: {new_path}")
+            
+            self.load_remote_files()
+            self.expand_remote_tree_to_path(new_path)
+
+    def expand_remote_tree_to_path(self, target_path: str):
+        for node_id, node_path in self.remote_tree_nodes.items():
+            if node_path == target_path:
+                self.remote_tree.selection_set(node_id)
+                self.remote_tree.focus(node_id)
+                self.remote_tree.see(node_id)
+                
+                parent = self.remote_tree.parent(node_id)
+                while parent:
+                    self.remote_tree.item(parent, open=True)
+                    if parent in self.remote_tree_nodes:
+                        self.populate_remote_tree_node(parent, self.remote_tree_nodes[parent])
+                    parent = self.remote_tree.parent(parent)
+                return
+
+    def show_local_context_menu(self, event):
+        menu = Menu(self, tearoff=0)
+        selected_items = self.local_file_list.selection()
+        
+        if selected_items:
+            menu.add_command(label="上传到远程", command=self.upload_from_local)
+            menu.add_separator()
+            menu.add_command(label="删除", command=self.delete_local_items)
+            menu.add_separator()
+        menu.add_command(label="刷新", command=lambda: self.load_local_files(self.local_path))
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def show_remote_context_menu(self, event):
+        menu = Menu(self, tearoff=0)
+        selected_items = self.remote_file_list.selection()
+        
+        if selected_items:
+            menu.add_command(label="下载到本地", command=self.download_to_local)
+            menu.add_separator()
+            menu.add_command(label="删除", command=self.delete_remote_items)
+            menu.add_separator()
+        menu.add_command(label="刷新", command=self.load_remote_files)
+        
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def on_drop_enter(self, event):
+        event.widget.focus_force()
+        return event.action
+
+    def on_drop_position(self, event):
+        return event.action
+
+    def on_drop_leave(self, event):
+        return event.action
+
+    def on_local_drag_init(self, event):
+        if self._local_dragging:
+            return 'break'
+        
+        selection = self.local_file_list.selection()
+        if not selection:
+            return 'break'
+        
+        data = []
+        for item_id in selection:
+            item = self.local_file_list.item(item_id)
+            filename = item["text"].strip()
+            full_path = os.path.join(self.local_path, filename)
+            if os.path.exists(full_path):
+                data.append(full_path)
+        
+        if data:
+            self._local_dragging = True
+            return ((ASK, COPY), (DND_FILES,), tuple(data))
+        return 'break'
+
+    def on_local_drag_end(self, event):
+        self._local_dragging = False
+
+    def on_remote_drag_init(self, event):
+        if self._remote_dragging:
+            return 'break'
+        
+        if not self.conn or not self.current_share:
+            return 'break'
+        
+        selection = self.remote_file_list.selection()
+        if not selection:
+            return 'break'
+        
+        data = []
+        for item_id in selection:
+            item = self.remote_file_list.item(item_id)
+            filename = item["text"].strip()
+            full_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+            data.append(f"{self.current_share}:{full_path}")
+        
+        if data:
+            self._remote_dragging = True
+            return ((ASK, COPY), (DND_FILES,), tuple(data))
+        return 'break'
+
+    def on_remote_drag_end(self, event):
+        self._remote_dragging = False
+
+    def on_remote_path_enter(self, event):
+        path_text = self.remote_path_entry.get()
+        if ":" in path_text:
+            share, path = path_text.split(":", 1)
+            if share == self.current_share:
+                self.remote_path = path
+                self.expand_remote_tree_to_path(path)
+                self.load_remote_files()
+
+    def format_size(self, size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        elif size < 1024 * 1024:
+            return f"{size/1024:.1f} KB"
+        elif size < 1024 * 1024 * 1024:
+            return f"{size/(1024 * 1024):.1f} MB"
+        else:
+            return f"{size/(1024 * 1024 * 1024):.1f} GB"
+
+    def sort_local_file_list(self, col: str):
+        if self.local_sorted_column == col:
+            self.local_sort_reverse = not self.local_sort_reverse
+        else:
+            self.local_sorted_column = col
+            self.local_sort_reverse = False
+        
+        items = [(self.local_file_list.set(child, col), child)
+                 for child in self.local_file_list.get_children('')]
+        
+        self.sort_items(self.local_file_list, items, col, self.local_sort_reverse)
+        self.update_local_sort_indicator()
+
+    def sort_remote_file_list(self, col: str):
+        if self.remote_sorted_column == col:
+            self.remote_sort_reverse = not self.remote_sort_reverse
+        else:
+            self.remote_sorted_column = col
+            self.remote_sort_reverse = False
+        
+        items = [(self.remote_file_list.set(child, col), child)
+                 for child in self.remote_file_list.get_children('')]
+        
+        self.sort_items(self.remote_file_list, items, col, self.remote_sort_reverse)
+        self.update_remote_sort_indicator()
+
+    def sort_items(self, treeview, items, col: str, reverse: bool):
+        def get_sort_key(item):
+            val, item_id = item
+            tags = treeview.item(item_id, "tags")
+            is_dir = tags and "dir" in tags
+            dir_priority = 0 if is_dir else 1
+            
+            if col == "Size":
+                return (dir_priority, self.parse_size(val))
+            elif col == "Modified":
+                return (dir_priority, self.parse_date(val))
+            elif col == "Type":
+                return (dir_priority, val)
+            else:
+                natural_key = [int(s) if s.isdigit() else s.lower()
+                              for s in re.split(r'(\d+)', val)]
+                return (dir_priority, natural_key)
+        
+        items.sort(key=get_sort_key, reverse=reverse)
+        
+        for index, (val, item) in enumerate(items):
+            treeview.move(item, '', index)
+
+    def update_local_sort_indicator(self):
+        for col in self.local_file_list["columns"]:
+            text = self.local_file_list.heading(col)["text"]
+            text = text.replace(" ↑", "").replace(" ↓", "")
+            
+            if col == self.local_sorted_column:
+                arrow = " ↓" if self.local_sort_reverse else " ↑"
+                self.local_file_list.heading(col, text=text + arrow)
+            else:
+                self.local_file_list.heading(col, text=text)
+
+    def update_remote_sort_indicator(self):
+        for col in self.remote_file_list["columns"]:
+            text = self.remote_file_list.heading(col)["text"]
+            text = text.replace(" ↑", "").replace(" ↓", "")
+            
+            if col == self.remote_sorted_column:
+                arrow = " ↓" if self.remote_sort_reverse else " ↑"
+                self.remote_file_list.heading(col, text=text + arrow)
+            else:
+                self.remote_file_list.heading(col, text=text)
+
+    def parse_size(self, size_str: str) -> int:
+        if not size_str:
+            return 0
+        
+        units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
+        for unit, multiplier in units.items():
+            if size_str.endswith(unit):
+                try:
+                    num = float(size_str.replace(unit, "").strip())
+                    return int(num * multiplier)
+                except:
+                    return 0
+        return 0
+
+    def parse_date(self, date_str: str) -> float:
+        formats = [
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%m/%d/%Y %H:%M",
+            "%d-%b-%y %H:%M"
+        ]
+        
+        for fmt in formats:
+            try:
+                return datetime.datetime.strptime(date_str, fmt).timestamp()
+            except:
+                continue
+        return 0
 
     def show_connect_dialog(self):
         dialog = tk.Toplevel(self)
@@ -390,13 +1149,6 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 else:
                     self.after(0, lambda: self.on_connect_failed("连接失败"))
 
-            except (NotConnectedError, OperationFailure) as e:
-                self.after(0, lambda: self.on_connect_failed(f"认证失败: {str(e)}"))
-            except socket.error as e:
-                if hasattr(e, 'errno') and e.errno == 10054:
-                    self.after(0, lambda: self.on_connect_failed("连接被远程主机重置"))
-                else:
-                    self.after(0, lambda: self.on_connect_failed(f"网络错误: {str(e)}"))
             except Exception as e:
                 self.after(0, lambda: self.on_connect_failed(f"发生异常: {str(e)}"))
             finally:
@@ -414,9 +1166,9 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         
         if share_name and share_name in self.available_shares:
             self.current_share = share_name
-            self.init_directory_tree()
+            self.init_remote_directory_tree()
         else:
-            self.init_share_tree()
+            self.init_remote_browser()
             if share_name:
                 messagebox.showwarning("提示", 
                     f"共享 '{share_name}' 不存在！可用共享: {', '.join(self.available_shares)}")
@@ -439,388 +1191,20 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.update_status("已断开连接")
         self.log_message("已断开连接")
         
-        for item in self.tree_dir.get_children():
-            self.tree_dir.delete(item)
-        for item in self.file_list.get_children():
-            self.file_list.delete(item)
+        for item in self.remote_tree.get_children():
+            self.remote_tree.delete(item)
+        for item in self.remote_file_list.get_children():
+            self.remote_file_list.delete(item)
         
-        self.tree_nodes.clear()
-        self.path_entry.delete(0, "end")
-        self.item_count_var.set("0 个项目")
+        self.remote_tree_nodes.clear()
+        self.remote_path_entry.delete(0, "end")
+        self.remote_count_var.set("远程: 0 个项目")
 
-    def init_share_tree(self):
-        for item in self.tree_dir.get_children():
-            self.tree_dir.delete(item)
-        
-        root_id = self.tree_dir.insert("", "end", text=f"🖥️ {self.current_server_ip}", open=True)
-        self.tree_nodes[root_id] = "//SERVER_ROOT//"
-        
-        for share in self.available_shares:
-            node_id = self.tree_dir.insert(root_id, "end", text=f"📁 {share}", tags=("share",))
-            self.tree_nodes[node_id] = f"//SHARE//{share}"
-        
-        self.update_status("请选择共享目录")
-
-    def init_directory_tree(self):
-        for item in self.tree_dir.get_children():
-            self.tree_dir.delete(item)
-        
-        root_id = self.tree_dir.insert("", "end", text=f"📁 {self.current_share}", open=True)
-        self.tree_nodes[root_id] = "/"
-        
-        self.populate_tree_node(root_id, "/")
-        
-        self.tree_dir.selection_set(root_id)
-        self.tree_dir.focus(root_id)
-        self.on_tree_select(None)
-
-    def populate_tree_node(self, parent_id: str, path: str):
-        if not self.conn or not self.current_share:
-            return
-        
-        try:
-            for child in self.tree_dir.get_children(parent_id):
-                self.tree_dir.delete(child)
-            
-            dirs = [f for f in self.conn.listPath(self.current_share, path)
-                    if f.isDirectory and f.filename not in (".", "..")]
-            
-            for d in dirs:
-                full_path = os.path.join(path, d.filename).replace("\\", "/")
-                
-                if full_path.startswith("//"):
-                    full_path = full_path[2:]
-                if not full_path.startswith("/"):
-                    full_path = "/" + full_path
-                
-                node_id = self.tree_dir.insert(parent_id, "end", text=f"📁 {d.filename}", tags=("dir",))
-                self.tree_nodes[node_id] = full_path
-                
-                self.tree_dir.insert(node_id, "end", text="Loading...")
-        except NotConnectedError:
-            self.log_message(f"连接已断开，无法访问目录: {path}")
-            self.update_connection_status(False)
-        except OperationFailure as e:
-            self.log_message(f"操作失败: {path} - {str(e)}")
-        except Exception as e:
-            self.log_message(f"目录访问失败: {path} - {str(e)}")
-
-    def on_tree_expand(self, event):
-        node_id = self.tree_dir.focus()
-        if node_id and self.tree_dir.tag_has("dir", node_id):
-            self.populate_tree_node(node_id, self.tree_nodes[node_id])
-
-    def on_tree_select(self, event):
-        selected = self.tree_dir.selection()
-        if not selected:
-            return
-        
-        node_id = selected[0]
-        node_path = self.tree_nodes.get(node_id, "")
-        
-        if node_path.startswith("//SHARE//"):
-            self.current_share = self.tree_dir.item(node_id, "text").replace("📁 ", "")
-            self.current_path = "/"
-            self.log_message(f"已选择共享: {self.current_share}")
-            self.init_directory_tree()
-            self.update_back_button_state()
-            return
-        
-        if node_path and not node_path.startswith("//"):
-            self.current_path = node_path
-            self.path_entry.delete(0, "end")
-            self.path_entry.insert(0, f"{self.current_share}:{self.current_path}")
-            self.load_file_list()
-            self.update_back_button_state()
-
-    def on_path_enter(self, event):
-        path_text = self.path_entry.get()
-        if ":" in path_text:
-            share, path = path_text.split(":", 1)
-            if share == self.current_share:
-                self.current_path = path
-                self.select_in_directory_tree(path)
-                self.load_file_list()
-
-    def select_in_directory_tree(self, path: str):
-        for node_id, node_path in self.tree_nodes.items():
-            if node_path == path:
-                self.tree_dir.selection_set(node_id)
-                self.tree_dir.focus(node_id)
-                self.tree_dir.see(node_id)
-                return True
-        
-        parent_path = os.path.dirname(path.rstrip("/"))
-        if not parent_path or parent_path == "/":
-            return False
-        
-        parent_id = None
-        for node_id, node_path in self.tree_nodes.items():
-            if node_path == parent_path:
-                parent_id = node_id
-                break
-        
-        if parent_id:
-            self.tree_dir.item(parent_id, open=True)
-            self.populate_tree_node(parent_id, parent_path)
-            
-            for node_id, node_path in self.tree_nodes.items():
-                if node_path == path:
-                    self.tree_dir.selection_set(node_id)
-                    self.tree_dir.focus(node_id)
-                    self.tree_dir.see(node_id)
-                    return True
-        
-        return False
-
-    def load_file_list(self):
-        for item in self.file_list.get_children():
-            self.file_list.delete(item)
-        
-        if not self.conn or not self.current_share:
-            self.item_count_var.set("0 个项目")
-            return
-        
-        try:
-            files = self.conn.listPath(self.current_share, self.current_path)
-            file_count = 0
-            
-            for file in files:
-                if file.filename in [".", ".."]:
-                    continue
-                
-                file_count += 1
-                filename = file.filename
-                
-                try:
-                    mod_time = datetime.datetime.fromtimestamp(file.last_write_time).strftime("%Y-%m-%d %H:%M")
-                except (ValueError, OSError):
-                    mod_time = "未知"
-                
-                if file.isDirectory:
-                    self.file_list.insert("", "end", text=filename,
-                                        values=(f"📁 {filename}", "", "文件夹", mod_time),
-                                        tags=("dir",))
-                else:
-                    size = self.format_size(file.file_size)
-                    ext = os.path.splitext(filename)[1].upper()[1:] if "." in filename else ""
-                    self.file_list.insert("", "end", text=filename,
-                                        values=(f"📄 {filename}", size, ext or "文件", mod_time),
-                                        tags=("file",))
-            
-            self.file_list.tag_configure("dir", foreground="#0078d4")
-            self.file_list.tag_configure("file", foreground="black")
-            
-            if self.sorted_column:
-                self.sort_file_list(self.sorted_column)
-            
-            self.item_count_var.set(f"{file_count} 个项目")
-            self.update_status(f"{self.current_share}:{self.current_path}")
-            
-        except NotConnectedError:
-            self.log_message(f"连接已断开，无法访问目录: {self.current_path}")
-            self.update_connection_status(False)
-            self.update_status("连接已断开")
-        except OperationFailure as e:
-            self.log_message(f"操作失败: {self.current_path} - {str(e)}")
-            self.update_status("操作失败")
-        except Exception as e:
-            self.log_message(f"目录访问失败: {self.current_path} - {str(e)}")
-            self.update_status("目录访问失败")
-
-    def format_size(self, size: int) -> str:
-        if size < 1024:
-            return f"{size} B"
-        elif size < 1024 * 1024:
-            return f"{size/1024:.1f} KB"
-        elif size < 1024 * 1024 * 1024:
-            return f"{size/(1024 * 1024):.1f} MB"
-        else:
-            return f"{size/(1024 * 1024 * 1024):.1f} GB"
-
-    def sort_file_list(self, col: str):
-        if self.sorted_column == col:
-            self.sort_reverse = not self.sort_reverse
-        else:
-            self.sorted_column = col
-            self.sort_reverse = False
-        
-        items = [(self.file_list.set(child, col), child)
-                 for child in self.file_list.get_children('')]
-        
-        if col == "Size":
-            items.sort(key=lambda x: self.parse_size(x[0]), reverse=self.sort_reverse)
-        elif col == "Modified":
-            items.sort(key=lambda x: self.parse_date(x[0]), reverse=self.sort_reverse)
-        elif col == "Type":
-            items.sort(key=lambda x: (0 if self.file_list.item(x[1], "tags")[0] == "dir" else 1, x[0]),
-                      reverse=self.sort_reverse)
-        else:
-            items.sort(key=lambda x: (
-                0 if self.file_list.item(x[1], "tags")[0] == "dir" else 1,
-                [int(s) if s.isdigit() else s.lower()
-                for s in re.split(r'(\d+)', x[0])]
-                ), reverse=self.sort_reverse)
-        
-        for index, (val, item) in enumerate(items):
-            self.file_list.move(item, '', index)
-        
-        self.update_sort_indicator()
-
-    def update_sort_indicator(self):
-        for col in self.file_list["columns"]:
-            text = self.file_list.heading(col)["text"]
-            text = text.replace(" ↑", "").replace(" ↓", "")
-            
-            if col == self.sorted_column:
-                arrow = " ↓" if self.sort_reverse else " ↑"
-                self.file_list.heading(col, text=text + arrow)
-            else:
-                self.file_list.heading(col, text=text)
-
-    def parse_size(self, size_str: str) -> int:
-        if not size_str:
-            return 0
-        
-        units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
-        for unit, multiplier in units.items():
-            if size_str.endswith(unit):
-                try:
-                    num = float(size_str.replace(unit, "").strip())
-                    return int(num * multiplier)
-                except:
-                    return 0
-        return 0
-
-    def parse_date(self, date_str: str) -> float:
-        formats = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%d %H:%M",
-            "%m/%d/%Y %H:%M",
-            "%d-%b-%y %H:%M"
-        ]
-        
-        for fmt in formats:
-            try:
-                return datetime.datetime.strptime(date_str, fmt).timestamp()
-            except:
-                continue
-        return 0
-
-    def go_up(self):
-        if self.current_path == "/":
-            return
-        
-        parent_path = os.path.dirname(self.current_path.rstrip("/"))
-        if not parent_path:
-            parent_path = "/"
-        
-        self.current_path = parent_path
-        self.select_in_directory_tree(parent_path)
-        self.load_file_list()
-        self.path_entry.delete(0, "end")
-        self.path_entry.insert(0, f"{self.current_share}:{self.current_path}")
-        self.update_back_button_state()
-    
-    def update_back_button_state(self):
-        if self.current_path == "/":
-            self.btn_back.state(["disabled"])
-        else:
-            self.btn_back.state(["!disabled"])
-
-    def on_file_double_click(self, event):
-        item = self.file_list.identify_row(event.y) if event else self.file_list.selection()
-        if not item:
-            return
-        
-        if isinstance(item, tuple):
-            if not item:
-                return
-            item = item[0]
-        
-        item_data = self.file_list.item(item)
-        values = item_data["values"]
-        
-        if len(values) > 2 and values[2] in ["文件夹", "目录"]:
-            dir_name = item_data["text"].strip()
-            if dir_name.startswith("📁 "):
-                dir_name = dir_name[2:]
-            
-            new_path = os.path.join(self.current_path, dir_name).replace("\\", "/")
-            
-            if new_path.startswith("//"):
-                new_path = new_path[2:]
-            if not new_path.startswith("/"):
-                new_path = "/" + new_path
-            
-            self.current_path = new_path
-            self.path_entry.delete(0, "end")
-            self.path_entry.insert(0, f"{self.current_share}:{self.current_path}")
-            self.log_message(f"进入目录: {new_path}")
-            
-            self.load_file_list()
-            self.select_in_directory_tree(new_path)
-            self.update_back_button_state()
-
-    def show_tree_context_menu(self, event):
-        item = self.tree_dir.identify_row(event.y)
-        if not item:
-            return
-        
-        menu = Menu(self, tearoff=0)
-        menu.add_command(label="刷新", command=self.refresh_tree_node)
-        menu.add_separator()
-        menu.add_command(label="属性", command=lambda: self.show_properties(item, is_dir=True))
-        
-        menu.post(event.x_root, event.y_root)
-
-    def show_file_context_menu(self, event):
-        item = self.file_list.identify_row(event.y)
-        if not item:
-            return
-        
-        item_tags = self.file_list.item(item, "tags")
-        is_dir = "dir" in item_tags
-        
-        selected_items = self.file_list.selection()
-        if item not in selected_items:
-            self.file_list.selection_set(item)
-            selected_items = [item]
-        
-        menu = Menu(self, tearoff=0)
-        
-        if len(selected_items) > 1:
-            menu.add_command(label=f"下载所选({len(selected_items)}项)",
-                            command=self.download_selected_files)
-            menu.add_command(label=f"删除所选({len(selected_items)}项)",
-                            command=self.delete_selected_items)
-        else:
-            if is_dir:
-                menu.add_command(label="打开", command=lambda: self.on_file_double_click(event))
-            menu.add_command(label="下载", command=self.download_selected_files)
-            menu.add_command(label="删除", command=self.delete_selected_items)
-        
-        menu.add_separator()
-        menu.add_command(label="刷新", command=self.refresh_files)
-        
-        menu.post(event.x_root, event.y_root)
-
-    def refresh_tree_node(self):
-        selected = self.tree_dir.selection()
-        if selected:
-            node_id = selected[0]
-            if node_id in self.tree_nodes:
-                self.populate_tree_node(node_id, self.tree_nodes[node_id])
-
-    def refresh_files(self):
-        selected = self.tree_dir.selection()
-        if selected:
-            node_id = selected[0]
-            if node_id in self.tree_nodes:
-                self.populate_tree_node(node_id, self.tree_nodes[node_id])
-                self.load_file_list()
-                self.log_message("目录已刷新")
-                self.update_status("已刷新")
+    def refresh_all(self):
+        self.load_local_files(self.local_path)
+        self.load_remote_files()
+        self.log_message("已刷新")
+        self.update_status("已刷新")
 
     def create_folder(self):
         if not self.conn or not self.current_share:
@@ -835,274 +1219,251 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             messagebox.showerror("错误", "文件夹名称包含非法字符: \\ / : * ? \" < > |")
             return
         
-        new_path = os.path.join(self.current_path, folder_name).replace("\\", "/")
+        new_path = os.path.join(self.remote_path, folder_name).replace("\\", "/")
         
         try:
             self.conn.createDirectory(self.current_share, new_path)
             self.log_message(f"文件夹已创建: {new_path}")
-            self.refresh_files()
+            self.load_remote_files()
+            self.expand_remote_tree_to_path(self.remote_path)
         except Exception as e:
             self.log_message(f"创建失败: {str(e)}")
             messagebox.showerror("错误", f"目录创建失败: {str(e)}")
 
-    def upload_file(self, local_path=None):
+    def upload_from_local(self):
+        selected_items = self.local_file_list.selection()
+        if not selected_items:
+            messagebox.showwarning("提示", "请先在本地选择要上传的文件")
+            return
+        
         if not self.conn or not self.current_share:
             messagebox.showwarning("提示", "请先连接到服务器")
             return
         
-        if not local_path:
-            local_paths = filedialog.askopenfilenames(title="选择要上传的文件")
-            if not local_paths:
-                return
-        else:
-            local_paths = [local_path]
+        files_to_upload = []
+        for item_id in selected_items:
+            item = self.local_file_list.item(item_id)
+            filename = item["text"].strip()
+            local_path = os.path.join(self.local_path, filename)
+            
+            if os.path.exists(local_path):
+                files_to_upload.append((filename, local_path))
         
-        total_files = len(local_paths)
+        if not files_to_upload:
+            return
         
         def upload_thread():
             success_count = 0
-            for i, file_path in enumerate(local_paths):
-                filename = os.path.basename(file_path)
-                remote_path = os.path.join(self.current_path, filename)
-                clean_remote_path = self.normalize_path(remote_path)
-                
-                progress = int((i + 1) * 100 / total_files)
-                self.after(0, lambda p=progress, f=filename, t=i+1, tt=total_files: 
-                          self.update_status(f"上传: {f} ({t}/{tt})"))
+            total_files = len(files_to_upload)
+            
+            for i, (filename, local_path) in enumerate(files_to_upload):
+                self.after(0, lambda f=filename, c=i+1, t=total_files: 
+                          self.update_status(f"上传: {f} ({c}/{t})"))
                 
                 try:
-                    with open(file_path, "rb") as f:
-                        self.conn.storeFile(self.current_share, clean_remote_path, f)
-                    success_count += 1
-                    self.after(0, lambda f=filename: self.log_message(f"上传成功: {f}"))
+                    if os.path.isfile(local_path):
+                        remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+                        with open(local_path, "rb") as f:
+                            self.conn.storeFile(self.current_share, remote_path, f)
+                        success_count += 1
+                        self.after(0, lambda f=filename: self.log_message(f"上传成功: {f}"))
+                    elif os.path.isdir(local_path):
+                        self.upload_directory_recursive(local_path, self.remote_path)
+                        success_count += 1
                 except Exception as e:
                     self.after(0, lambda f=filename, e=str(e): self.log_message(f"上传失败[{f}]: {e}"))
             
             self.after(0, lambda: self.update_status("上传完成"))
-            self.after(0, lambda: self.log_message(f"文件上传完成: {success_count}/{total_files} 个文件成功"))
+            self.after(0, lambda: self.log_message(f"上传完成: {success_count}/{total_files}"))
             self.after(0, lambda: messagebox.showinfo("完成", f"成功上传 {success_count} 个文件"))
-            self.after(0, self.refresh_files)
+            self.after(0, self.load_remote_files)
         
         threading.Thread(target=upload_thread, daemon=True).start()
 
-    def upload_directory(self, local_dir_path=None):
-        if not self.conn or not self.current_share:
-            messagebox.showerror("错误", "请先连接到SMB服务器")
-            return
+    def upload_directory_recursive(self, local_dir: str, remote_base: str):
+        dir_name = os.path.basename(local_dir)
+        remote_dir = os.path.join(remote_base, dir_name).replace("\\", "/")
         
-        if not local_dir_path:
-            local_dir_path = filedialog.askdirectory(title="选择要上传的目录")
-        if not local_dir_path:
-            return
-        
-        dir_name = os.path.basename(local_dir_path)
-        remote_base_path = os.path.join(self.current_path, dir_name).replace("\\", "/")
-        
-        remote_exists = False
         try:
-            self.conn.listPath(self.current_share, remote_base_path)
-            remote_exists = True
-            self.log_message(f"检测到目标目录已存在: {remote_base_path}")
-        except Exception as e:
-            self.log_message(f"检查目录存在性时出错: {str(e)}")
+            self.conn.createDirectory(self.current_share, remote_dir)
+        except:
+            pass
         
-        if remote_exists:
-            if not messagebox.askyesno("覆盖确认",
-                                    f"目标目录 '{remote_base_path}' 已存在。是否覆盖？\n"
-                                    "(覆盖将删除目标目录及其所有内容)"):
-                self.log_message("用户取消上传：目标目录已存在且用户选择不覆盖")
-                return
-        
-        def upload_thread():
-            try:
-                total_files = sum(len(files) for _, _, files in os.walk(local_dir_path))
-                self.after(0, lambda: self.update_status(f"扫描完成, 共 {total_files} 个文件"))
-
-                count, success_count, error_list = self._upload_directory_recursive(
-                    local_dir_path, remote_base_path, total_files
-                    )
-                
-                self.after(0, lambda: self.update_status("上传完成"))
-                self.after(0, lambda: self.log_message(f"目录上传完成: {success_count}/{total_files} 个文件成功"))
-                if error_list:
-                    error_msg = "\n".join(error_list[:5])
-                    if len(error_list) > 5:
-                        error_msg += f"\n...等共 {len(error_list)} 个错误"
-                    self.after(0, lambda: self.log_message(f"上传错误:\n{error_msg}"))
-                
-                self.after(0, lambda: messagebox.showinfo("完成",
-                    f"目录上传完成!\n成功上传 {success_count}/{total_files} 个文件到:\n{remote_base_path}"))
-                self.after(0, self.refresh_files)
-            except Exception as e:
-                self.after(0, lambda: self.log_message(f"目录上传失败: {str(e)}"))
-                self.after(0, lambda: self.update_status(f"上传失败: {str(e)}"))
-                self.after(0, lambda: messagebox.showerror("错误", f"上传失败: {str(e)}"))
-        
-        threading.Thread(target=upload_thread, daemon=True).start()
-        self.log_message(f"开始上传目录: {local_dir_path} -> {remote_base_path}")
-
-    def _upload_directory_recursive(self, local_path: str, smb_base_path: str, total_files: int, 
-                                    count: int = 0, success_count: int = 0, error_list: List = None):
-        if error_list is None:
-            error_list = []
-        
-        for entry in os.listdir(local_path):
-            local_entry_path = os.path.join(local_path, entry)
-            remote_entry_path = os.path.join(smb_base_path, entry).replace("\\", "/")
+        for item in os.listdir(local_dir):
+            local_path = os.path.join(local_dir, item)
+            remote_path = os.path.join(remote_dir, item).replace("\\", "/")
             
-            if os.path.isdir(local_entry_path):
-                try:
-                    self.conn.createDirectory(self.current_share, remote_entry_path)
-                except OperationFailure as e:
-                    if "STATUS_OBJECT_NAME_COLLISION" not in str(e):
-                        error_list.append(f"目录创建失败: {remote_entry_path} - {str(e)}")
-                
-                count, success_count, error_list = self._upload_directory_recursive(
-                    local_entry_path, remote_entry_path, total_files, count, success_count, error_list
-                    )
-            
+            if os.path.isdir(local_path):
+                self.upload_directory_recursive(local_path, remote_dir)
             else:
-                count += 1
-                progress = min(100, int(count * 100 / total_files)) if total_files > 0 else 0
-                self.after(0, lambda p=progress, e=entry, c=count, tt=total_files: 
-                          self.update_status(f"上传: {e} ({c}/{tt})"))
-                
-                try:
-                    with open(local_entry_path, "rb") as f:
-                        self.conn.storeFile(self.current_share, remote_entry_path, f)
-                    success_count += 1
-                except Exception as e:
-                    error_list.append(f"文件上传失败 [{entry}]: {str(e)}")
-        
-        return count, success_count, error_list
+                with open(local_path, "rb") as f:
+                    self.conn.storeFile(self.current_share, remote_path, f)
 
-    def download_selected_files(self):
-        selected_items = self.file_list.selection()
+    def download_to_local(self):
+        selected_items = self.remote_file_list.selection()
         if not selected_items:
-            messagebox.showwarning("提示", "请先选择要下载的文件")
+            messagebox.showwarning("提示", "请先在远程选择要下载的文件")
             return
         
-        save_dir = filedialog.askdirectory(title="选择保存位置")
-        if not save_dir:
+        if not self.conn or not self.current_share:
+            messagebox.showwarning("提示", "请先连接到服务器")
             return
         
-        file_list = []
+        files_to_download = []
         for item_id in selected_items:
-            item = self.file_list.item(item_id)
+            item = self.remote_file_list.item(item_id)
             filename = item["text"].strip()
-            if filename.startswith("📁 ") or filename.startswith("📄 "):
-                filename = filename[2:]
+            tags = item.get("tags", [])
+            is_dir = "dir" in tags
             
-            if item["values"][2] in ["文件夹", "目录"]:
-                continue
-            
-            remote_path = os.path.join(self.current_path, filename)
-            clean_remote_path = self.normalize_path(remote_path)
-            local_path = os.path.join(save_dir, filename)
-            file_list.append((filename, clean_remote_path, local_path))
+            remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+            local_path = os.path.join(self.local_path, filename)
+            files_to_download.append((filename, remote_path, local_path, is_dir))
         
-        if not file_list:
+        if not files_to_download:
             return
         
         def download_thread():
             success_count = 0
-            total_files = len(file_list)
-            for i, (filename, remote_path, local_path) in enumerate(file_list):
+            total_files = len(files_to_download)
+            
+            for i, (filename, remote_path, local_path, is_dir) in enumerate(files_to_download):
                 self.after(0, lambda f=filename, c=i+1, t=total_files: 
                           self.update_status(f"下载: {f} ({c}/{t})"))
+                
                 try:
-                    with open(local_path, "wb") as f:
-                        self.conn.retrieveFile(self.current_share, remote_path, f)
-                    self.after(0, lambda f=filename: self.log_message(f"下载成功: {f}"))
-                    success_count += 1
+                    if not is_dir:
+                        with open(local_path, "wb") as f:
+                            self.conn.retrieveFile(self.current_share, remote_path, f)
+                        success_count += 1
+                        self.after(0, lambda f=filename: self.log_message(f"下载成功: {f}"))
+                    else:
+                        self.download_directory_recursive(remote_path, local_path)
+                        success_count += 1
                 except Exception as e:
                     self.after(0, lambda f=filename, e=str(e): self.log_message(f"下载失败[{f}]: {e}"))
             
             self.after(0, lambda: self.update_status("下载完成"))
-            self.after(0, lambda: self.log_message(f"下载完成: {success_count}/{len(file_list)}"))
-            self.after(0, lambda: messagebox.showinfo("下载完成",
-                              f"成功下载 {success_count} 个文件到:\n{save_dir}"))
+            self.after(0, lambda: self.log_message(f"下载完成: {success_count}/{total_files}"))
+            self.after(0, lambda: messagebox.showinfo("完成", f"成功下载 {success_count} 个文件"))
+            self.after(0, lambda: self.load_local_files(self.local_path))
         
         threading.Thread(target=download_thread, daemon=True).start()
-        self.log_message(f"开始后台下载 {len(file_list)} 个文件...")
 
-    def delete_selected_items(self):
-        selected_items = self.file_list.selection()
+    def download_directory_recursive(self, remote_dir: str, local_base: str):
+        if not os.path.exists(local_base):
+            os.makedirs(local_base)
+        
+        try:
+            items = self.conn.listPath(self.current_share, remote_dir)
+            for item in items:
+                if item.filename in [".", ".."]:
+                    continue
+                
+                remote_path = os.path.join(remote_dir, item.filename).replace("\\", "/")
+                local_path = os.path.join(local_base, item.filename)
+                
+                if item.isDirectory:
+                    self.download_directory_recursive(remote_path, local_path)
+                else:
+                    with open(local_path, "wb") as f:
+                        self.conn.retrieveFile(self.current_share, remote_path, f)
+        except Exception as e:
+            self.log_message(f"下载目录失败: {remote_dir} - {str(e)}")
+
+    def delete_local_items(self):
+        selected_items = self.local_file_list.selection()
         if not selected_items:
             messagebox.showwarning("警告", "请先选择要删除的文件或目录")
             return
         
         items_to_delete = []
         for item_id in selected_items:
-            item = self.file_list.item(item_id)
+            item = self.local_file_list.item(item_id)
             item_name = item["text"].strip()
-            if item_name.startswith("📁 ") or item_name.startswith("📄 "):
-                item_name = item_name[2:]
-            
-            is_dir = item["values"][2] in ["文件夹", "目录"]
-            full_path = os.path.join(self.current_path, item_name).replace("\\", "/")
-            items_to_delete.append((item_name, full_path, is_dir, item_id))
+            tags = item.get("tags", [])
+            is_dir = "dir" in tags
+            full_path = os.path.join(self.local_path, item_name)
+            items_to_delete.append((item_name, full_path, is_dir))
         
         if not items_to_delete:
-            messagebox.showwarning("警告", "没有有效的项目可删除")
             return
         
-        file_count = sum(1 for item in items_to_delete if not item[2])
-        dir_count = len(items_to_delete) - file_count
-        
-        non_empty_dirs = []
-        for item in items_to_delete:
-            if item[2]:
-                try:
-                    contents = self.conn.listPath(self.current_share, item[1])
-                    if len([f for f in contents if f.filename not in ('.', '..')]) > 0:
-                        non_empty_dirs.append(item[0])
-                except:
-                    non_empty_dirs.append(item[0])
-        
-        if file_count and dir_count:
-            confirm_msg = f"确定要删除选中的 {file_count} 个文件和 {dir_count} 个目录吗？"
-        elif file_count:
-            confirm_msg = f"确定要删除选中的 {file_count} 个文件吗？"
-        else:
-            confirm_msg = f"确定要删除选中的 {dir_count} 个目录吗？"
-        
-        if non_empty_dirs:
-            confirm_msg += f"\n\n警告: 以下目录非空: {', '.join(non_empty_dirs)}\n删除非空目录将同时删除其所有内容！"
-        
+        confirm_msg = f"确定要删除选中的 {len(items_to_delete)} 个项目吗？\n此操作不可恢复！"
         if not messagebox.askyesno("确认删除", confirm_msg):
             return
         
         success_count = 0
-        failed_items = []
         
         def delete_thread():
             nonlocal success_count
-            for item_name, full_path, is_dir, item_id in items_to_delete:
+            import shutil
+            for item_name, full_path, is_dir in items_to_delete:
+                try:
+                    if os.path.exists(full_path):
+                        if is_dir:
+                            shutil.rmtree(full_path)
+                        else:
+                            os.remove(full_path)
+                        success_count += 1
+                        self.after(0, lambda p=full_path: self.log_message(f"已删除: {p}"))
+                except Exception as e:
+                    self.after(0, lambda n=item_name, e=str(e): self.log_message(f"删除失败[{n}]: {e}"))
+            
+            self.after(0, lambda: self.update_status("删除完成"))
+            self.after(0, lambda: messagebox.showinfo("完成", f"成功删除 {success_count} 个项目"))
+            self.after(0, lambda: self.load_local_files(self.local_path))
+        
+        threading.Thread(target=delete_thread, daemon=True).start()
+
+    def delete_remote_items(self):
+        selected_items = self.remote_file_list.selection()
+        if not selected_items:
+            messagebox.showwarning("警告", "请先选择要删除的文件或目录")
+            return
+        
+        if not self.conn or not self.current_share:
+            messagebox.showwarning("提示", "请先连接到服务器")
+            return
+        
+        items_to_delete = []
+        for item_id in selected_items:
+            item = self.remote_file_list.item(item_id)
+            item_name = item["text"].strip()
+            tags = item.get("tags", [])
+            is_dir = "dir" in tags
+            full_path = os.path.join(self.remote_path, item_name).replace("\\", "/")
+            items_to_delete.append((item_name, full_path, is_dir))
+        
+        if not items_to_delete:
+            return
+        
+        confirm_msg = f"确定要删除选中的 {len(items_to_delete)} 个项目吗？"
+        if not messagebox.askyesno("确认删除", confirm_msg):
+            return
+        
+        success_count = 0
+        
+        def delete_thread():
+            nonlocal success_count
+            for item_name, full_path, is_dir in items_to_delete:
                 try:
                     if is_dir:
-                        self._delete_directory_recursive(full_path)
+                        self.delete_remote_directory_recursive(full_path)
                     else:
                         self.conn.deleteFiles(self.current_share, full_path)
                     success_count += 1
                     self.after(0, lambda p=full_path: self.log_message(f"已删除: {p}"))
                 except Exception as e:
-                    failed_items.append((item_name, str(e)))
                     self.after(0, lambda n=item_name, e=str(e): self.log_message(f"删除失败[{n}]: {e}"))
             
-            result_msg = f"成功删除 {success_count}/{len(items_to_delete)} 个项目"
-            if failed_items:
-                result_msg += "\n\n以下项目删除失败:\n"
-                result_msg += "\n".join(f"{name}: {error}" for name, error in failed_items)
-            
-            self.after(0, lambda: messagebox.showinfo("删除结果", result_msg))
-            self.after(0, self.refresh_files)
             self.after(0, lambda: self.update_status("删除完成"))
+            self.after(0, lambda: messagebox.showinfo("完成", f"成功删除 {success_count} 个项目"))
+            self.after(0, self.load_remote_files)
         
         threading.Thread(target=delete_thread, daemon=True).start()
-        self.log_message(f"开始后台删除 {len(items_to_delete)} 个项目...")
 
-    def _delete_directory_recursive(self, path: str):
+    def delete_remote_directory_recursive(self, path: str):
         try:
             contents = self.conn.listPath(self.current_share, path)
             for file in contents:
@@ -1111,7 +1472,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 
                 item_path = os.path.join(path, file.filename).replace("\\", "/")
                 if file.isDirectory:
-                    self._delete_directory_recursive(item_path)
+                    self.delete_remote_directory_recursive(item_path)
                 else:
                     self.conn.deleteFiles(self.current_share, item_path)
             
@@ -1120,56 +1481,125 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.log_message(f"删除目录失败: {path} - {str(e)}")
             raise
 
-    def show_properties(self, item_id: str, is_dir: bool):
-        try:
-            if is_dir:
-                dir_name = self.tree_dir.item(item_id, "text").replace("📁 ", "").replace("🖥️ ", "")
-                full_path = self.tree_nodes.get(item_id, "")
-                properties = f"名称: {dir_name}\n类型: 文件夹\n位置: {full_path}"
+    def on_external_drop(self, event):
+        if not self.conn or not self.current_share:
+            messagebox.showwarning("提示", "请先连接到服务器")
+            return
+        
+        files = self.parse_dnd_files(event.data)
+        if files:
+            self.upload_files_by_path(files)
+
+    def on_drop_to_remote(self, event):
+        if not self.conn or not self.current_share:
+            messagebox.showwarning("提示", "请先连接到服务器")
+            return
+        
+        if self._local_dragging:
+            self.upload_from_local()
+            return event.action
+        
+        files = self.parse_dnd_files(event.data)
+        if files:
+            self.upload_files_by_path(files)
+        
+        return event.action
+
+    def on_drop_to_local(self, event):
+        if self._remote_dragging:
+            if not self.conn or not self.current_share:
+                messagebox.showwarning("提示", "请先连接到服务器")
+                return event.action
+            self.download_to_local()
+            return event.action
+        
+        files = self.parse_dnd_files(event.data)
+        if files:
+            for src_path in files:
+                filename = os.path.basename(src_path)
+                dest_path = os.path.join(self.local_path, filename)
+                try:
+                    import shutil
+                    if os.path.isdir(src_path):
+                        if os.path.exists(dest_path):
+                            shutil.rmtree(dest_path)
+                        shutil.copytree(src_path, dest_path)
+                    else:
+                        shutil.copy2(src_path, dest_path)
+                    self.log_message(f"已复制: {filename}")
+                except Exception as e:
+                    self.log_message(f"复制失败[{filename}]: {str(e)}")
+            self.load_local_files(self.local_path)
+        
+        return event.action
+
+    def parse_dnd_files(self, data):
+        files = []
+        if data:
+            try:
+                paths = self.tk.splitlist(data)
+                for path in paths:
+                    path = path.strip()
+                    if path and os.path.exists(path):
+                        files.append(path)
+            except:
+                data = data.strip()
+                if data.startswith('{') and data.endswith('}'):
+                    data = data[1:-1]
+                paths = data.split('} {')
+                for path in paths:
+                    path = path.strip('{}').strip()
+                    if path and os.path.exists(path):
+                        files.append(path)
+        return files
+
+    def upload_files_by_path(self, file_paths):
+        if not self.conn or not self.current_share:
+            return
+        
+        def upload_thread():
+            success_count = 0
+            total_files = len(file_paths)
+            
+            for i, local_path in enumerate(file_paths):
+                self.after(0, lambda f=os.path.basename(local_path), c=i+1, t=total_files: 
+                          self.update_status(f"上传: {f} ({c}/{t})"))
                 
                 try:
-                    file_count = len(self.conn.listPath(self.current_share, full_path)) - 2
-                    properties += f"\n包含项目: {file_count}"
-                except:
-                    pass
-            else:
-                file_name = self.file_list.item(item_id, "text").replace("📄 ", "").replace("📁 ", "")
-                full_path = os.path.join(self.current_path, file_name).replace("\\", "/")
-                properties = f"名称: {file_name}\n类型: 文件\n位置: {full_path}"
-                
-                file_attr = self.conn.getAttributes(self.current_share, full_path)
-                
-                size = self.format_size(file_attr.file_size)
-                modified = datetime.datetime.fromtimestamp(file_attr.last_write_time)
-                
-                properties += f"\n大小: {size}\n修改时间: {modified}"
+                    if os.path.isfile(local_path):
+                        filename = os.path.basename(local_path)
+                        remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+                        with open(local_path, "rb") as f:
+                            self.conn.storeFile(self.current_share, remote_path, f)
+                        success_count += 1
+                        self.after(0, lambda f=filename: self.log_message(f"上传成功: {f}"))
+                    elif os.path.isdir(local_path):
+                        self.upload_directory_recursive(local_path, self.remote_path)
+                        success_count += 1
+                except Exception as e:
+                    self.after(0, lambda f=os.path.basename(local_path), e=str(e): self.log_message(f"上传失败[{f}]: {e}"))
             
-            messagebox.showinfo("属性", properties)
-        except Exception as e:
-            self.log_message(f"获取属性失败: {str(e)}")
-            messagebox.showerror("错误", f"无法获取属性: {str(e)}")
+            self.after(0, lambda: self.update_status("上传完成"))
+            self.after(0, lambda: self.log_message(f"上传完成: {success_count}/{total_files}"))
+            self.after(0, self.load_remote_files)
+        
+        threading.Thread(target=upload_thread, daemon=True).start()
 
     def show_about(self):
-        about_text = """SMB文件管理器 v2.0
+        about_text = """SMB文件管理器 v3.0
 
-一个功能完善的SMB协议文件管理器，
-仿照Windows资源管理器风格设计。
+双栏本地-远程文件管理器，支持拖拽操作。
 
 功能特性:
+• 双栏文件浏览（本地+远程）
 • 服务器连接管理
-• 双栏文件浏览
-• 文件上传/下载
-• 目录操作
+• 文件上传/下载（支持拖拽）
+• 目录自动展开
+• 文件列表排序
 • 批量操作
 • 操作日志
 """
         messagebox.showinfo("关于", about_text)
-
-    def normalize_path(self, path: str) -> str:
-        return path.replace("\\", "/").rstrip("/")
-
-    def set_view_mode(self, mode: str):
-        pass
 
     def process_tasks(self):
         try:
