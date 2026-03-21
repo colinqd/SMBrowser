@@ -202,7 +202,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         self.local_file_list = ttk.Treeview(local_list_frame,
                                              columns=("Name", "Size", "Type", "Modified"),
-                                             show="headings", selectmode="extended")
+                                             show="tree headings", selectmode="extended")
         self.local_file_list.pack(side="left", fill="both", expand=True)
 
         local_columns = [
@@ -253,7 +253,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         self.remote_file_list = ttk.Treeview(remote_list_frame,
                                               columns=("Name", "Size", "Type", "Modified"),
-                                              show="headings", selectmode="extended")
+                                              show="tree headings", selectmode="extended")
         self.remote_file_list.pack(side="left", fill="both", expand=True)
 
         remote_columns = [

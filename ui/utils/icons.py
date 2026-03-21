@@ -2,6 +2,7 @@ import tkinter as tk
 from PIL import Image, ImageDraw
 from io import BytesIO
 import base64
+import os
 
 
 def create_icons():
@@ -71,7 +72,6 @@ def create_icons():
 
         draw.rectangle([3, 2, size-3, size-2], fill=bg_color, outline=outline_color)
         draw.rectangle([3, 2, 9, size-2], fill='#FFE082', outline=outline_color)
-        draw.text([4, 4], 'Z', fill=outline_color)
 
         return img
 
@@ -84,8 +84,8 @@ def create_icons():
 
         draw.rectangle([4, 2, size-4, size-2], fill=bg_color, outline=outline_color)
         draw.rectangle([5, 4, 8, size-4], fill=outline_color)
-        draw.ellipse([9, 6, 12, 9], fill=outline_color)
-        draw.ellipse([9, 10, 12, 13], fill=outline_color)
+        draw.rectangle([9, 6, 12, 9], fill=outline_color)
+        draw.rectangle([9, 10, 12, 13], fill=outline_color)
 
         return img
 
@@ -109,8 +109,8 @@ def create_icons():
         outline_color = '#0097A7'
 
         draw.rectangle([3, 1, size-3, size-2], fill=bg_color, outline=outline_color)
-        draw.text([5, 3], '<>', fill=outline_color)
-        draw.text([5, 8], '/', fill=outline_color)
+        draw.line([5, 4, 8, 7], fill=outline_color)
+        draw.line([5, 7, 8, 4], fill=outline_color)
 
         return img
 
@@ -186,6 +186,3 @@ def get_file_icon(icons, filename: str):
             return icons[icon_type]
 
     return icons['file']
-
-
-import os
