@@ -1,0 +1,4 @@
+kivy>=2.3.0
+kivymd>=1.2.0
+pysmb>=1.2.9
+python-for-android>=2023.9.16
