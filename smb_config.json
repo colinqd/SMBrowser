@@ -1,1 +1,17 @@
-{"dhl": {"server_ip": "27.210.169.247", "port": "51445", "username": "zwg", "password": "123695", "share_name": "/dhl"}, "local": {"server_ip": "127.0.0.1", "port": "445", "username": "DHL", "share_name": "test", "smb_version": "\u81ea\u52a8\u534f\u5546"}}
+{
+  "dhl": {
+    "server_ip": "hnasvr.asia",
+    "port": "51445",
+    "username": "zwg",
+    "password": "123695",
+    "share_name": "/文件",
+    "smb_version": "自动协商"
+  },
+  "local": {
+    "server_ip": "127.0.0.1",
+    "port": "445",
+    "username": "DHL",
+    "share_name": "test",
+    "smb_version": "自动协商"
+  }
+}

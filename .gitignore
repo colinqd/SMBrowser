@@ -30,3 +30,26 @@ wheels/
 # OS
 .DS_Store
 Thumbs.db
+
+# Android Studio
+.gradle/
+build/
+local.properties
+*.iml
+*.apk
+*.ap_
+*.aab
+.gradle/
+local.properties
+/captures/
+.externalNativeBuild/
+.cxx/
+*.keystore
+*.jks
+
+# Buildozer
+.buildozer/
+bin/
+
+# Kivy
+.kivy/
