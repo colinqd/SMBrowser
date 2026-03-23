@@ -35,13 +35,15 @@ class FileBrowser:
             return ""
 
     def load_path(self, path: str):
+        self.current_files = []
+        
         if not self.conn_manager:
             print("错误: 连接管理器未设置")
-            return []
+            return self.current_files
         
         if not self.conn_manager.conn:
             print("错误: SMB连接未建立")
-            return []
+            return self.current_files
 
         self.current_path = path
         try:
@@ -52,7 +54,6 @@ class FileBrowser:
             )
             print(f"获取到 {len(files) if files else 0} 个文件/目录")
             
-            self.current_files = []
             if files:
                 for f in files:
                     try:
@@ -87,13 +88,13 @@ class FileBrowser:
             
             self.current_files.sort(key=lambda x: (not x['isDirectory'], x['filename'].lower()))
             print(f"成功加载 {len(self.current_files)} 个文件/目录")
-            return self.current_files
             
         except Exception as e:
             print(f"加载目录失败: {str(e)}")
             import traceback
             traceback.print_exc()
-            return []
+        
+        return self.current_files
     
     def get_current_files_json(self) -> str:
         return json.dumps(self.current_files, ensure_ascii=False)

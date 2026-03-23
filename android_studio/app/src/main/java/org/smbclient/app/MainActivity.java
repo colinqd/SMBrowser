@@ -603,7 +603,7 @@ public class MainActivity extends AppCompatActivity {
                 String filesJson = fileBrowser.callAttr("get_current_files_json").toString();
                 JSONArray jsonArray = new JSONArray(filesJson);
                 
-                List<Map<String, Object>> newFileList = new ArrayList<>();
+                final List<Map<String, Object>> newFileList = new ArrayList<>();
                 for (int i = 0; i < jsonArray.length(); i++) {
                     JSONObject fileObj = jsonArray.getJSONObject(i);
                     Map<String, Object> fileData = new HashMap<>();
@@ -616,9 +616,7 @@ public class MainActivity extends AppCompatActivity {
                 
                 mainHandler.post(() -> {
                     showProgress(false);
-                    fileDataList.clear();
-                    fileDataList.addAll(newFileList);
-                    fileAdapter.notifyDataSetChanged();
+                    fileAdapter.updateData(newFileList);
                     tvPath.setText(path);
                     updateClipboardUI();
                 });
