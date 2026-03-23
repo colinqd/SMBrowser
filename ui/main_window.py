@@ -382,7 +382,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         drives = get_local_drives()
         for drive in drives:
-            node_id = self.local_tree.insert("", "end", text=f" {drive}", image=self.icons['drive'], open=False)
+            node_id = self.local_tree.insert("", "end", text=f" {drive}", 
+                                              image=self.icons['drive'], tags=("drive",), open=False)
             self.local_tree_nodes[node_id] = drive
             self.local_tree.insert(node_id, "end", text="Loading...")
 
@@ -394,15 +395,26 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 self.local_tree.delete(child)
 
             if os.path.exists(path):
-                dirs = [d for d in os.listdir(path) if os.path.isdir(os.path.join(path, d))]
+                try:
+                    items = os.listdir(path)
+                except PermissionError:
+                    self.log_message(f"无权限访问: {path}")
+                    return
+                except Exception as e:
+                    self.log_message(f"访问失败: {path} - {str(e)}")
+                    return
+                    
+                dirs = sorted([d for d in items if os.path.isdir(os.path.join(path, d))], key=str.lower)
                 for d in dirs:
                     full_path = os.path.join(path, d)
-                    node_id = self.local_tree.insert(parent_id, "end", text=f" {d}", image=self.icons['folder'], tags=("dir",))
+                    node_id = self.local_tree.insert(parent_id, "end", text=f" {d}", 
+                                                      image=self.icons['folder'], tags=("dir",))
                     self.local_tree_nodes[node_id] = full_path
 
                     try:
-                        os.listdir(full_path)
-                        self.local_tree.insert(node_id, "end", text="Loading...")
+                        sub_items = os.listdir(full_path)
+                        if any(os.path.isdir(os.path.join(full_path, item)) for item in sub_items):
+                            self.local_tree.insert(node_id, "end", text="Loading...")
                     except:
                         pass
         except Exception as e:
@@ -411,7 +423,9 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
     def on_local_tree_expand(self, event):
         node_id = self.local_tree.focus()
         if node_id and node_id in self.local_tree_nodes:
-            self.populate_local_tree_node(node_id, self.local_tree_nodes[node_id])
+            path = self.local_tree_nodes[node_id]
+            if os.path.exists(path):
+                self.populate_local_tree_node(node_id, path)
 
     def on_local_tree_select(self, event):
         selected = self.local_tree.selection()
@@ -545,12 +559,17 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.remote_tree.delete(item)
         self.remote_tree_nodes.clear()
 
-        root_id = self.remote_tree.insert("", "end", text=f" {self.conn_manager.current_server_ip}", image=self.icons['server'], open=True)
+        root_id = self.remote_tree.insert("", "end", text=f" {self.conn_manager.current_server_ip}", 
+                                           image=self.icons['server'], open=True)
         self.remote_tree_nodes[root_id] = "//SERVER_ROOT//"
 
         for share in self.conn_manager.available_shares:
-            node_id = self.remote_tree.insert(root_id, "end", text=f" {share}", image=self.icons['share'], tags=("share",))
+            node_id = self.remote_tree.insert(root_id, "end", text=f" {share}", 
+                                               image=self.icons['share'], tags=("share",))
             self.remote_tree_nodes[node_id] = f"//SHARE//{share}"
+            self.remote_tree.insert(node_id, "end", text="Loading...")
+        
+        self.remote_tree.item(root_id, open=True)
 
     def init_remote_directory_tree(self):
         for item in self.remote_tree.get_children():
@@ -574,8 +593,10 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             for child in self.remote_tree.get_children(parent_id):
                 self.remote_tree.delete(child)
 
-            dirs = [f for f in self.conn_manager.list_path(self.conn_manager.current_share, path)
-                    if f.isDirectory and f.filename not in (".", "..")]
+            files = self.conn_manager.list_path(self.conn_manager.current_share, path)
+            dirs = sorted([f for f in files 
+                          if f.isDirectory and f.filename not in (".", "..")],
+                         key=lambda x: x.filename.lower())
 
             for d in dirs:
                 full_path = os.path.join(path, d.filename).replace("\\", "/")
@@ -585,7 +606,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 if not full_path.startswith("/"):
                     full_path = "/" + full_path
 
-                node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", image=self.icons['folder'], tags=("dir",))
+                node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", 
+                                                   image=self.icons['folder'], tags=("dir",))
                 self.remote_tree_nodes[node_id] = full_path
 
                 self.remote_tree.insert(node_id, "end", text="Loading...")
@@ -594,8 +616,39 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
     def on_remote_tree_expand(self, event):
         node_id = self.remote_tree.focus()
-        if node_id and self.remote_tree.tag_has("dir", node_id):
-            self.populate_remote_tree_node(node_id, self.remote_tree_nodes[node_id])
+        if not node_id or node_id not in self.remote_tree_nodes:
+            return
+        
+        node_path = self.remote_tree_nodes[node_id]
+        
+        if node_path.startswith("//SHARE//"):
+            share_name = self.remote_tree.item(node_id, "text").strip()
+            self.conn_manager.current_share = share_name
+            self.populate_remote_share_node(node_id, share_name)
+        elif self.remote_tree.tag_has("dir", node_id):
+            self.populate_remote_tree_node(node_id, node_path)
+
+    def populate_remote_share_node(self, parent_id: str, share_name: str):
+        if not self.conn_manager.conn:
+            return
+        
+        try:
+            for child in self.remote_tree.get_children(parent_id):
+                self.remote_tree.delete(child)
+            
+            files = self.conn_manager.list_path(share_name, "/")
+            dirs = sorted([f for f in files 
+                          if f.isDirectory and f.filename not in (".", "..")],
+                         key=lambda x: x.filename.lower())
+            
+            for d in dirs:
+                full_path = "/" + d.filename
+                node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", 
+                                                   image=self.icons['folder'], tags=("dir",))
+                self.remote_tree_nodes[node_id] = full_path
+                self.remote_tree.insert(node_id, "end", text="Loading...")
+        except Exception as e:
+            self.log_message(f"共享目录访问失败: {share_name} - {str(e)}")
 
     def on_remote_tree_select(self, event):
         selected = self.remote_tree.selection()
@@ -605,11 +658,17 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         node_id = selected[0]
         node_path = self.remote_tree_nodes.get(node_id, "")
 
+        if node_path == "//SERVER_ROOT//":
+            return
+
         if node_path.startswith("//SHARE//"):
-            self.conn_manager.current_share = self.remote_tree.item(node_id, "text").strip()
+            share_name = self.remote_tree.item(node_id, "text").strip()
+            self.conn_manager.current_share = share_name
             self.remote_path = "/"
-            self.log_message(f"已选择共享: {self.conn_manager.current_share}")
-            self.init_remote_directory_tree()
+            self.remote_path_entry.delete(0, "end")
+            self.remote_path_entry.insert(0, f"{share_name}:/")
+            self.log_message(f"已选择共享: {share_name}")
+            self.load_remote_files()
             return
 
         if node_path and not node_path.startswith("//"):
@@ -700,6 +759,10 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.expand_remote_tree_to_path(new_path)
 
     def expand_remote_tree_to_path(self, target_path: str):
+        target_path = target_path.rstrip('/')
+        if not target_path.startswith('/'):
+            target_path = '/' + target_path
+            
         for node_id, node_path in self.remote_tree_nodes.items():
             if node_path == target_path:
                 self.remote_tree.selection_set(node_id)
@@ -709,8 +772,12 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 parent = self.remote_tree.parent(node_id)
                 while parent:
                     self.remote_tree.item(parent, open=True)
-                    if parent in self.remote_tree_nodes:
-                        self.populate_remote_tree_node(parent, self.remote_tree_nodes[parent])
+                    parent_path = self.remote_tree_nodes.get(parent, "")
+                    if parent_path and not parent_path.startswith("//"):
+                        self.populate_remote_tree_node(parent, parent_path)
+                    elif parent_path.startswith("//SHARE//"):
+                        share_name = self.remote_tree.item(parent, "text").strip()
+                        self.populate_remote_share_node(parent, share_name)
                     parent = self.remote_tree.parent(parent)
                 return
 
