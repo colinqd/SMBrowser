@@ -8,9 +8,12 @@ import shutil
 from typing import Optional, Dict, List
 
 from config.settings import Settings
+from config.security import SecurityManager
 from core.connection import SMBConnectionManager
 from core.file_ops import FileOperations
 from ui.dialogs.connect_dialog import ConnectDialog
+from ui.dialogs.master_password_dialog import MasterPasswordDialog
+from ui.dialogs.change_password_dialog import ChangePasswordDialog
 from ui.utils.helpers import format_size, parse_size, parse_date, get_local_drives, sort_items
 from ui.utils.icons import create_icons, get_file_icon
 
@@ -38,9 +41,9 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.servers: Dict = Settings.load_servers()
         self.remote_tree_nodes: Dict[str, str] = {}
         self.local_tree_nodes: Dict[str, str] = {}
-        self.local_sorted_column: str = "Name"
+        self.local_sorted_column: str = ""
         self.local_sort_reverse: bool = False
-        self.remote_sorted_column: str = "Name"
+        self.remote_sorted_column: str = ""
         self.remote_sort_reverse: bool = False
         self.task_queue: queue.Queue = queue.Queue()
 
@@ -57,6 +60,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         self.update_local_sort_indicator()
         self.update_remote_sort_indicator()
+
+        self._check_master_password()
 
     def setup_style(self):
         style = ttk.Style()
@@ -113,6 +118,11 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         view_menu = Menu(menubar, tearoff=0)
         view_menu.add_command(label="刷新", command=self.refresh_all, accelerator="F5")
         menubar.add_cascade(label="查看", menu=view_menu)
+
+        settings_menu = Menu(menubar, tearoff=0)
+        settings_menu.add_command(label="修改主密码", command=self.show_change_password_dialog)
+        settings_menu.add_command(label="恢复默认主密码", command=self.reset_to_default_password)
+        menubar.add_cascade(label="设置", menu=settings_menu)
 
         help_menu = Menu(menubar, tearoff=0)
         help_menu.add_command(label="关于", command=self.show_about)
@@ -365,6 +375,37 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.log_area.see("end")
         self.log_area.config(state="disabled")
 
+    def _check_master_password(self):
+        has_config = Settings.has_config()
+        if has_config or self.servers:
+            self._request_master_password(is_first_time=False)
+        else:
+            self._request_master_password(is_first_time=True)
+
+    def _request_master_password(self, is_first_time: bool):
+        if is_first_time:
+            Settings.unlock(SecurityManager.DEFAULT_MASTER_PASSWORD)
+            self.log_message("首次使用，已设置默认主密码")
+            return
+            
+        def on_success(password: str):
+            Settings.unlock(password)
+            self.log_message("主密码验证成功")
+            self._decrypt_saved_servers()
+
+        dialog = MasterPasswordDialog(self, is_first_time, on_success)
+        dialog.show()
+
+    def _decrypt_saved_servers(self):
+        try:
+            for config_name, config in self.servers.items():
+                if "password" in config:
+                    encrypted_pwd = config["password"]
+                    decrypted_pwd = Settings.decrypt_password(encrypted_pwd)
+                    config["password"] = decrypted_pwd
+        except Exception as e:
+            self.log_message(f"解密密码失败: {str(e)}")
+
     def update_status(self, text: str):
         self.status_var.set(text)
 
@@ -443,39 +484,43 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         for item in self.local_file_list.get_children():
             self.local_file_list.delete(item)
 
+        self.local_sorted_column = "#0"
+        self.local_sort_reverse = False
+
         file_count = 0
         try:
             if os.path.exists(path):
                 items = os.listdir(path)
 
-                for item in items:
+                dirs = sorted([d for d in items if os.path.isdir(os.path.join(path, d))], key=str.lower)
+                file_items = sorted([f for f in items if os.path.isfile(os.path.join(path, f))], key=str.lower)
+
+                for item in dirs:
                     item_path = os.path.join(path, item)
 
                     try:
-                        if os.path.isdir(item_path):
-                            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
-                            self.local_file_list.insert("", "end", text=item,
-                                                         values=("", "文件夹", mod_time),
-                                                         tags=("dir",),
-                                                         image=self.icons['folder'])
-                            file_count += 1
+                        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                        self.local_file_list.insert("", "end", text=item,
+                                                     values=("", "文件夹", mod_time),
+                                                     tags=("dir",),
+                                                     image=self.icons['folder'])
+                        file_count += 1
                     except:
                         pass
 
-                for item in items:
+                for item in file_items:
                     item_path = os.path.join(path, item)
 
                     try:
-                        if os.path.isfile(item_path):
-                            size = format_size(os.path.getsize(item_path))
-                            ext = os.path.splitext(item)[1].upper()[1:] if "." in item else ""
-                            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
-                            file_icon = get_file_icon(self.icons, item)
-                            self.local_file_list.insert("", "end", text=item,
-                                                         values=(size, ext or "文件", mod_time),
-                                                         tags=("file",),
-                                                         image=file_icon)
-                            file_count += 1
+                        size = format_size(os.path.getsize(item_path))
+                        ext = os.path.splitext(item)[1].upper()[1:] if "." in item else ""
+                        mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(item_path)).strftime("%Y-%m-%d %H:%M")
+                        file_icon = get_file_icon(self.icons, item)
+                        self.local_file_list.insert("", "end", text=item,
+                                                     values=(size, ext or "文件", mod_time),
+                                                     tags=("file",),
+                                                     image=file_icon)
+                        file_count += 1
                     except:
                         pass
 
@@ -514,8 +559,10 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.load_local_files(new_path)
 
     def expand_local_tree_to_path(self, target_path: str):
+        target_path = os.path.normpath(target_path)
+        
         for node_id, node_path in self.local_tree_nodes.items():
-            if node_path == target_path:
+            if os.path.normpath(node_path) == target_path:
                 self.local_tree.selection_set(node_id)
                 self.local_tree.focus(node_id)
                 self.local_tree.see(node_id)
@@ -523,7 +570,32 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 parent = self.local_tree.parent(node_id)
                 while parent:
                     self.local_tree.item(parent, open=True)
+                    parent_path = self.local_tree_nodes.get(parent, "")
+                    if parent_path:
+                        self.populate_local_tree_node(parent, parent_path)
                     parent = self.local_tree.parent(parent)
+                return
+
+        path_parts = []
+        current = target_path
+        while current and current != os.path.dirname(current):
+            path_parts.insert(0, current)
+            current = os.path.dirname(current)
+        if current:
+            path_parts.insert(0, current)
+
+        for path in path_parts:
+            for node_id, node_path in self.local_tree_nodes.items():
+                if os.path.normpath(node_path) == path:
+                    self.local_tree.item(node_id, open=True)
+                    self.populate_local_tree_node(node_id, path)
+                    break
+
+        for node_id, node_path in self.local_tree_nodes.items():
+            if os.path.normpath(node_path) == target_path:
+                self.local_tree.selection_set(node_id)
+                self.local_tree.focus(node_id)
+                self.local_tree.see(node_id)
                 return
 
     def go_local_up(self):
@@ -563,13 +635,21 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                                            image=self.icons['server'], open=True)
         self.remote_tree_nodes[root_id] = "//SERVER_ROOT//"
 
+        first_share_node = None
         for share in self.conn_manager.available_shares:
             node_id = self.remote_tree.insert(root_id, "end", text=f" {share}", 
                                                image=self.icons['share'], tags=("share",))
             self.remote_tree_nodes[node_id] = f"//SHARE//{share}"
             self.remote_tree.insert(node_id, "end", text="Loading...")
+            if first_share_node is None:
+                first_share_node = node_id
         
         self.remote_tree.item(root_id, open=True)
+        
+        if first_share_node:
+            self.remote_tree.selection_set(first_share_node)
+            self.remote_tree.focus(first_share_node)
+            self.on_remote_tree_select(None)
 
     def init_remote_directory_tree(self):
         for item in self.remote_tree.get_children():
@@ -587,9 +667,11 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
     def populate_remote_tree_node(self, parent_id: str, path: str):
         if not self.conn_manager.conn or not self.conn_manager.current_share:
+            self.log_message("无法填充目录树: 未连接或未选择共享")
             return
 
         try:
+            self.log_message(f"填充目录树: {path}")
             for child in self.remote_tree.get_children(parent_id):
                 self.remote_tree.delete(child)
 
@@ -597,6 +679,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             dirs = sorted([f for f in files 
                           if f.isDirectory and f.filename not in (".", "..")],
                          key=lambda x: x.filename.lower())
+            
+            self.log_message(f"找到 {len(dirs)} 个子目录")
 
             for d in dirs:
                 full_path = os.path.join(path, d.filename).replace("\\", "/")
@@ -609,6 +693,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                 node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", 
                                                    image=self.icons['folder'], tags=("dir",))
                 self.remote_tree_nodes[node_id] = full_path
+                self.log_message(f"添加目录节点: {d.filename} -> {full_path}")
 
                 self.remote_tree.insert(node_id, "end", text="Loading...")
         except Exception as e:
@@ -617,9 +702,11 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
     def on_remote_tree_expand(self, event):
         node_id = self.remote_tree.focus()
         if not node_id or node_id not in self.remote_tree_nodes:
+            self.log_message(f"展开节点无效: {node_id}")
             return
         
         node_path = self.remote_tree_nodes[node_id]
+        self.log_message(f"展开节点路径: {node_path}")
         
         if node_path.startswith("//SHARE//"):
             share_name = self.remote_tree.item(node_id, "text").strip()
@@ -627,12 +714,16 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.populate_remote_share_node(node_id, share_name)
         elif self.remote_tree.tag_has("dir", node_id):
             self.populate_remote_tree_node(node_id, node_path)
+        else:
+            self.log_message(f"节点类型未知: {node_path}")
 
     def populate_remote_share_node(self, parent_id: str, share_name: str):
         if not self.conn_manager.conn:
+            self.log_message("无法填充共享节点: 未连接")
             return
         
         try:
+            self.log_message(f"填充共享节点: {share_name}")
             for child in self.remote_tree.get_children(parent_id):
                 self.remote_tree.delete(child)
             
@@ -641,11 +732,14 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                           if f.isDirectory and f.filename not in (".", "..")],
                          key=lambda x: x.filename.lower())
             
+            self.log_message(f"共享根目录找到 {len(dirs)} 个子目录")
+            
             for d in dirs:
                 full_path = "/" + d.filename
                 node_id = self.remote_tree.insert(parent_id, "end", text=f" {d.filename}", 
                                                    image=self.icons['folder'], tags=("dir",))
                 self.remote_tree_nodes[node_id] = full_path
+                self.log_message(f"添加共享目录节点: {d.filename} -> {full_path}")
                 self.remote_tree.insert(node_id, "end", text="Loading...")
         except Exception as e:
             self.log_message(f"共享目录访问失败: {share_name} - {str(e)}")
@@ -653,10 +747,12 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
     def on_remote_tree_select(self, event):
         selected = self.remote_tree.selection()
         if not selected:
+            self.log_message("未选择任何节点")
             return
 
         node_id = selected[0]
         node_path = self.remote_tree_nodes.get(node_id, "")
+        self.log_message(f"选择节点: {node_id}, 路径: {node_path}")
 
         if node_path == "//SERVER_ROOT//":
             return
@@ -675,45 +771,57 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.remote_path = node_path
             self.remote_path_entry.delete(0, "end")
             self.remote_path_entry.insert(0, f"{self.conn_manager.current_share}:{self.remote_path}")
+            self.log_message(f"加载目录: {node_path}")
             self.load_remote_files()
+        else:
+            self.log_message(f"节点路径无效: {node_path}")
 
     def load_remote_files(self):
         for item in self.remote_file_list.get_children():
             self.remote_file_list.delete(item)
 
+        self.remote_sorted_column = "#0"
+        self.remote_sort_reverse = False
+
         if not self.conn_manager.conn or not self.conn_manager.current_share:
             self.remote_count_var.set("远程: 0 个项目")
+            self.log_message("未连接或未选择共享")
             return
 
         try:
+            self.log_message(f"正在加载: {self.conn_manager.current_share}:{self.remote_path}")
             files = self.conn_manager.list_path(self.conn_manager.current_share, self.remote_path)
             file_count = 0
 
-            for file in files:
-                if file.filename in [".", ".."]:
-                    continue
+            dirs = sorted([f for f in files if f.filename not in [".", ".."] and f.isDirectory], 
+                          key=lambda x: x.filename.lower())
+            file_items = sorted([f for f in files if f.filename not in [".", ".."] and not f.isDirectory],
+                               key=lambda x: x.filename.lower())
 
-                file_count += 1
-                filename = file.filename
-
+            for d in dirs:
                 try:
-                    mod_time = datetime.datetime.fromtimestamp(file.last_write_time).strftime("%Y-%m-%d %H:%M")
+                    mod_time = datetime.datetime.fromtimestamp(d.last_write_time).strftime("%Y-%m-%d %H:%M")
                 except:
                     mod_time = "未知"
+                self.remote_file_list.insert("", "end", text=d.filename,
+                                              values=("", "文件夹", mod_time),
+                                              tags=("dir",),
+                                              image=self.icons['folder'])
+                file_count += 1
 
-                if file.isDirectory:
-                    self.remote_file_list.insert("", "end", text=filename,
-                                                  values=("", "文件夹", mod_time),
-                                                  tags=("dir",),
-                                                  image=self.icons['folder'])
-                else:
-                    size = format_size(file.file_size)
-                    ext = os.path.splitext(filename)[1].upper()[1:] if "." in filename else ""
-                    file_icon = get_file_icon(self.icons, filename)
-                    self.remote_file_list.insert("", "end", text=filename,
-                                                  values=(size, ext or "文件", mod_time),
-                                                  tags=("file",),
-                                                  image=file_icon)
+            for f in file_items:
+                try:
+                    mod_time = datetime.datetime.fromtimestamp(f.last_write_time).strftime("%Y-%m-%d %H:%M")
+                except:
+                    mod_time = "未知"
+                size = format_size(f.file_size)
+                ext = os.path.splitext(f.filename)[1].upper()[1:] if "." in f.filename else ""
+                file_icon = get_file_icon(self.icons, f.filename)
+                self.remote_file_list.insert("", "end", text=f.filename,
+                                              values=(size, ext or "文件", mod_time),
+                                              tags=("file",),
+                                              image=file_icon)
+                file_count += 1
 
             self.remote_file_list.tag_configure("dir", foreground="#0078d4")
             self.remote_file_list.tag_configure("file", foreground="black")
@@ -723,6 +831,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
             self.remote_count_var.set(f"远程: {file_count} 个项目")
             self.update_status(f"{self.conn_manager.current_share}:{self.remote_path}")
+            self.log_message(f"加载完成: {file_count} 个项目")
 
         except Exception as e:
             self.log_message(f"目录访问失败: {self.remote_path} - {str(e)}")
@@ -779,6 +888,31 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                         share_name = self.remote_tree.item(parent, "text").strip()
                         self.populate_remote_share_node(parent, share_name)
                     parent = self.remote_tree.parent(parent)
+                return
+
+        path_parts = []
+        current = target_path
+        while current and current != '/':
+            path_parts.insert(0, current)
+            current = '/'.join(current.rsplit('/', 1)[:-1]) or '/'
+        path_parts.insert(0, '/')
+
+        for path in path_parts:
+            for node_id, node_path in self.remote_tree_nodes.items():
+                if node_path == path:
+                    self.remote_tree.item(node_id, open=True)
+                    if path.startswith("//SHARE//"):
+                        share_name = self.remote_tree.item(node_id, "text").strip()
+                        self.populate_remote_share_node(node_id, share_name)
+                    else:
+                        self.populate_remote_tree_node(node_id, path)
+                    break
+
+        for node_id, node_path in self.remote_tree_nodes.items():
+            if node_path == target_path:
+                self.remote_tree.selection_set(node_id)
+                self.remote_tree.focus(node_id)
+                self.remote_tree.see(node_id)
                 return
 
     def show_local_context_menu(self, event):
@@ -957,7 +1091,15 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             "share_name": share_name,
             "smb_version": smb_version
         }
-        Settings.save_servers(self.servers)
+        
+        servers_to_save = {}
+        for name, config in self.servers.items():
+            cfg = config.copy()
+            if "password" in cfg and cfg["password"]:
+                cfg["password"] = Settings.encrypt_password(cfg["password"])
+            servers_to_save[name] = cfg
+            
+        Settings.save_servers(servers_to_save)
         self.log_message(f"配置已保存: {config_name}")
 
     def connect_to_server(self, server_ip: str, port: str, username: str,
@@ -1285,6 +1427,34 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
                     if path and os.path.exists(path):
                         files.append(path)
         return files
+
+    def show_change_password_dialog(self):
+        def on_success(new_password: str):
+            if Settings.change_master_password(new_password):
+                self.log_message("主密码修改成功")
+                messagebox.showinfo("成功", "主密码修改成功！\n请牢记您的新主密码。")
+            else:
+                messagebox.showerror("错误", "主密码修改失败")
+
+        dialog = ChangePasswordDialog(self, on_success)
+        dialog.show()
+
+    def reset_to_default_password(self):
+        result = messagebox.askyesno(
+            "确认恢复",
+            "恢复默认主密码将：\n\n"
+            "1. 清空所有保存的服务器连接配置\n"
+            "2. 重置主密码为默认值 'admin'\n\n"
+            "此操作不可恢复！\n\n"
+            "确定要继续吗？"
+        )
+        if result:
+            if Settings.clear_all_settings():
+                self.servers = {}
+                self.log_message("已恢复默认主密码，所有配置已清空")
+                messagebox.showinfo("成功", "已恢复默认主密码 'admin'\n\n所有保存的连接配置已清空。")
+            else:
+                messagebox.showerror("错误", "恢复默认主密码失败")
 
     def show_about(self):
         about_text = """SMB文件管理器 v3.0

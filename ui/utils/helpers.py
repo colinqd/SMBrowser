@@ -61,24 +61,34 @@ def get_local_drives():
 
 
 def sort_items(treeview, items, col: str, reverse: bool):
-    def get_sort_key(item):
+    def get_sort_value(item):
         val, item_id = item
-        tags = treeview.item(item_id, "tags")
-        is_dir = tags and "dir" in tags
-        dir_priority = 0 if is_dir else 1
-
         if col == "Size":
-            return (dir_priority, parse_size(val))
+            return parse_size(val)
         elif col == "Modified":
-            return (dir_priority, parse_date(val))
+            return parse_date(val)
         elif col == "Type":
-            return (dir_priority, val)
+            return val.lower() if val else ""
         else:
             natural_key = [int(s) if s.isdigit() else s.lower()
                           for s in re.split(r'(\d+)', val)]
-            return (dir_priority, natural_key)
+            return natural_key
 
-    items.sort(key=get_sort_key, reverse=reverse)
+    dir_items = []
+    file_items = []
+    for item in items:
+        val, item_id = item
+        tags = treeview.item(item_id, "tags")
+        is_dir = tags and "dir" in tags
+        if is_dir:
+            dir_items.append(item)
+        else:
+            file_items.append(item)
 
-    for index, (val, item) in enumerate(items):
+    dir_items.sort(key=get_sort_value, reverse=reverse)
+    file_items.sort(key=get_sort_value, reverse=reverse)
+
+    sorted_items = dir_items + file_items
+
+    for index, (val, item) in enumerate(sorted_items):
         treeview.move(item, '', index)

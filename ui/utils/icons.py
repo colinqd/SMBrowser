@@ -144,7 +144,7 @@ def create_icons():
         with BytesIO() as output:
             img.save(output, format='PNG')
             data = output.getvalue()
-        return tk.PhotoImage(data=base64.b64encode(data))
+        return tk.PhotoImage(data=base64.b64encode(data).decode('ascii'))
 
     icons = {
         'folder': img_to_photo(create_folder_icon(16)),

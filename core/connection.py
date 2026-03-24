@@ -80,10 +80,7 @@ class SMBConnectionManager:
     def list_path(self, share: str, path: str):
         if not self.conn:
             raise NotConnectedError("未连接")
-        search_path = path.rstrip('/') + '/*'
-        if search_path == '/*':
-            search_path = '/*'
-        return self.conn.listPath(share, search_path)
+        return self.conn.listPath(share, path)
 
     def create_directory(self, share: str, path: str):
         if not self.conn:
