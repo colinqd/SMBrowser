@@ -6,6 +6,70 @@ from typing import Callable, List, Tuple
 from smb.base import NotConnectedError
 
 
+def format_speed(bytes_per_sec):
+    if bytes_per_sec < 1024:
+        return f"{bytes_per_sec:.1f} B/s"
+    elif bytes_per_sec < 1024 * 1024:
+        return f"{bytes_per_sec / 1024:.1f} KB/s"
+    else:
+        return f"{bytes_per_sec / (1024 * 1024):.1f} MB/s"
+
+
+class ProgressFileWrapper:
+    def __init__(self, file_obj, total_size, filename, on_log):
+        self.file_obj = file_obj
+        self.total_size = total_size
+        self.filename = filename
+        self.on_log = on_log
+        self.bytes_read = 0
+        self.last_reported_percent = -1
+        self.start_time = time.time()
+
+    def read(self, size=-1):
+        data = self.file_obj.read(size)
+        self.bytes_read += len(data)
+        if self.total_size > 0:
+            percent = int((self.bytes_read / self.total_size) * 100)
+            if percent != self.last_reported_percent and percent % 2 == 0:
+                elapsed = time.time() - self.start_time
+                speed = self.bytes_read / elapsed if elapsed > 0 else 0
+                speed_str = format_speed(speed)
+                self.on_log(f"正在上传: {self.filename} - {percent}% ({speed_str})")
+                self.last_reported_percent = percent
+        return data
+
+    def close(self):
+        self.file_obj.close()
+
+
+class ProgressWriteFileWrapper:
+    def __init__(self, file_obj, total_size, filename, on_log, start_offset=0):
+        self.file_obj = file_obj
+        self.total_size = total_size
+        self.filename = filename
+        self.on_log = on_log
+        self.start_offset = start_offset
+        self.bytes_written = 0
+        self.last_reported_percent = -1
+        self.start_time = time.time()
+
+    def write(self, data):
+        self.file_obj.write(data)
+        self.bytes_written += len(data)
+        if self.total_size > 0:
+            total = self.start_offset + self.bytes_written
+            percent = int((total / self.total_size) * 100)
+            if percent != self.last_reported_percent and percent % 2 == 0:
+                elapsed = time.time() - self.start_time
+                speed = self.bytes_written / elapsed if elapsed > 0 else 0
+                speed_str = format_speed(speed)
+                self.on_log(f"正在下载: {self.filename} - {percent}% ({speed_str})")
+                self.last_reported_percent = percent
+
+    def close(self):
+        self.file_obj.close()
+
+
 class FileOperations:
     def __init__(self, conn_manager):
         self.conn_manager = conn_manager
@@ -56,6 +120,7 @@ class FileOperations:
 
     def _upload_file_with_retry(self, local_path: str, remote_path: str, on_log: Callable[[str], None]) -> bool:
         local_file_size = os.path.getsize(local_path)
+        filename = os.path.basename(local_path)
         
         for attempt in range(self._retry_count):
             try:
@@ -65,24 +130,27 @@ class FileOperations:
                 
                 if remote_file_info and not remote_file_info['is_directory']:
                     if remote_file_info['size'] >= local_file_size:
-                        on_log(f"跳过（已存在且完整）: {os.path.basename(local_path)}")
+                        on_log(f"跳过（已存在且完整）: {filename}")
                         return True
-                    on_log(f"文件已存在但大小不同，将覆盖: {os.path.basename(local_path)}")
+                    on_log(f"文件已存在但大小不同，将覆盖: {filename}")
                 
+                on_log(f"开始上传: {filename} ({local_file_size} 字节)")
                 with open(local_path, "rb") as f:
+                    progress_file = ProgressFileWrapper(f, local_file_size, filename, on_log)
                     self.conn_manager.store_file(
-                        self.conn_manager.current_share, remote_path, f
+                        self.conn_manager.current_share, remote_path, progress_file
                     )
+                on_log(f"上传完成: {filename} - 100%")
                 return True
                 
             except Exception as e:
                 error_msg = str(e)
                 if "unpack requires a buffer" in error_msg:
-                    on_log(f"服务器协议错误，尝试重试: {os.path.basename(local_path)}")
+                    on_log(f"服务器协议错误，尝试重试: {filename}")
                     time.sleep(self._retry_delay)
                     continue
                 if attempt < self._retry_count - 1:
-                    on_log(f"上传失败，重试中 ({attempt + 1}/{self._retry_count}): {os.path.basename(local_path)}")
+                    on_log(f"上传失败，重试中 ({attempt + 1}/{self._retry_count}): {filename}")
                     time.sleep(self._retry_delay)
                 else:
                     raise
@@ -143,6 +211,7 @@ class FileOperations:
 
     def _download_file_with_retry(self, remote_path: str, local_path: str, on_log: Callable[[str], None]) -> bool:
         remote_path_normalized = self._normalize_remote_path(remote_path)
+        filename = os.path.basename(local_path)
         
         for attempt in range(self._retry_count):
             try:
@@ -150,33 +219,44 @@ class FileOperations:
                     self.conn_manager.current_share, remote_path_normalized
                 )
                 
+                if not remote_file_info:
+                    on_log(f"无法获取文件信息: {filename}")
+                    return False
+                
+                file_size = remote_file_info['size']
+                
                 if os.path.exists(local_path):
                     local_size = os.path.getsize(local_path)
-                    if remote_file_info and local_size >= remote_file_info['size']:
-                        on_log(f"跳过（已存在且完整）: {os.path.basename(local_path)}")
+                    if local_size >= file_size:
+                        on_log(f"跳过（已存在且完整）: {filename}")
                         return True
-                    if remote_file_info and local_size > 0 and local_size < remote_file_info['size']:
-                        on_log(f"断点续传: {os.path.basename(local_path)} (从 {local_size} 字节开始)")
+                    if local_size > 0 and local_size < file_size:
+                        on_log(f"断点续传: {filename} (从 {local_size} 字节开始)")
                         with open(local_path, "ab") as f:
+                            progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log, local_size)
                             self.conn_manager.retrieve_file(
-                                self.conn_manager.current_share, remote_path_normalized, f
+                                self.conn_manager.current_share, remote_path_normalized, progress_file
                             )
+                        on_log(f"下载完成: {filename} - 100%")
                         return True
                 
+                on_log(f"开始下载: {filename} ({file_size} 字节)")
                 with open(local_path, "wb") as f:
+                    progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log)
                     self.conn_manager.retrieve_file(
-                        self.conn_manager.current_share, remote_path_normalized, f
+                        self.conn_manager.current_share, remote_path_normalized, progress_file
                     )
+                on_log(f"下载完成: {filename} - 100%")
                 return True
                 
             except Exception as e:
                 error_msg = str(e)
                 if "unpack requires a buffer" in error_msg:
-                    on_log(f"服务器协议错误，尝试重试: {os.path.basename(local_path)}")
+                    on_log(f"服务器协议错误，尝试重试: {filename}")
                     time.sleep(self._retry_delay)
                     continue
                 if attempt < self._retry_count - 1:
-                    on_log(f"下载失败，重试中 ({attempt + 1}/{self._retry_count}): {os.path.basename(local_path)}")
+                    on_log(f"下载失败，重试中 ({attempt + 1}/{self._retry_count}): {filename}")
                     time.sleep(self._retry_delay)
                 else:
                     raise

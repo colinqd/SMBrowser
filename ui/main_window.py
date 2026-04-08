@@ -553,11 +553,13 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         if "dir" in tags:
             dir_name = item_data["text"].strip()
             new_path = os.path.join(self.local_path, dir_name)
+            
+            if not os.path.exists(new_path) or not os.path.isdir(new_path):
+                return
 
             self.local_path = new_path
             self.local_path_entry.delete(0, "end")
             self.local_path_entry.insert(0, self.local_path)
-            self.expand_local_tree_to_path(new_path)
             self.load_local_files(new_path)
 
     def expand_local_tree_to_path(self, target_path: str):
@@ -880,7 +882,6 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.log_message(f"进入目录: {new_path}")
 
             self.load_remote_files()
-            self.expand_remote_tree_to_path(new_path)
 
     def expand_remote_tree_to_path(self, target_path: str):
         target_path = target_path.rstrip('/')

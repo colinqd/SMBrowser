@@ -4,7 +4,6 @@ import time
 from typing import Optional, List, Callable
 from smb.SMBConnection import SMBConnection
 from smb.base import NotConnectedError
-from smb.smb_structs import UnsupportedFeature
 
 
 class SMBConnectionManager:
@@ -178,37 +177,6 @@ class SMBConnectionManager:
                     except:
                         pass
                     raise e2
-            raise
-
-    def list_directory(self, share: str, path: str):
-        if not self.conn:
-            raise NotConnectedError("未连接")
-        
-        path = path.replace("\\", "/")
-        if not path.startswith("/"):
-            path = "/" + path
-        
-        search_pattern = path.rstrip("/") + "/*"
-        
-        def _list():
-            return self.conn.listPath(share, search_pattern)
-        
-        try:
-            return self._execute_with_retry(_list)
-        except Exception as e:
-            error_msg = str(e)
-            if "unpack requires a buffer" in error_msg:
-                try:
-                    parent_path = "/".join(path.rstrip("/").split("/")[:-1]) or "/"
-                    results = self.conn.listPath(share, parent_path.rstrip("/") + "/*")
-                    dir_name = path.rstrip("/").split("/")[-1] if path != "/" else ""
-                    if dir_name:
-                        for item in results:
-                            if item.filename == dir_name and item.isDirectory:
-                                return self.conn.listPath(share, search_pattern)
-                    return results
-                except:
-                    pass
             raise
 
     def get_file_info(self, share: str, path: str) -> Optional[dict]:
