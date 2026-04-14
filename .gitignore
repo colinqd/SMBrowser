@@ -53,3 +53,9 @@ bin/
 
 # Kivy
 .kivy/
+
+# SMB配置文件（加密存储）
+smb_config.dat
+.smb_salt
+smb_config.json
+smb_config.json.bak

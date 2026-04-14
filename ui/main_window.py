@@ -391,20 +391,9 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         def on_success(password: str):
             Settings.unlock(password)
             self.log_message("主密码验证成功")
-            self._decrypt_saved_servers()
 
         dialog = MasterPasswordDialog(self, is_first_time, on_success)
         dialog.show()
-
-    def _decrypt_saved_servers(self):
-        try:
-            for config_name, config in self.servers.items():
-                if "password" in config:
-                    encrypted_pwd = config["password"]
-                    decrypted_pwd = Settings.decrypt_password(encrypted_pwd)
-                    config["password"] = decrypted_pwd
-        except Exception as e:
-            self.log_message(f"解密密码失败: {str(e)}")
 
     def update_status(self, text: str):
         self.status_var.set(text)
@@ -1152,14 +1141,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             "smb_version": smb_version
         }
         
-        servers_to_save = {}
-        for name, config in self.servers.items():
-            cfg = config.copy()
-            if "password" in cfg and cfg["password"]:
-                cfg["password"] = Settings.encrypt_password(cfg["password"])
-            servers_to_save[name] = cfg
-            
-        Settings.save_servers(servers_to_save)
+        Settings.save_servers(self.servers)
         self.log_message(f"配置已保存: {config_name}")
 
     def connect_to_server(self, server_ip: str, port: str, username: str,

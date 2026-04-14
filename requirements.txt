@@ -1,5 +1,0 @@
-pysmb
-tkinterdnd2
-pywin32
-Pillow
-cryptography

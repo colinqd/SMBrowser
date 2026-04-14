@@ -67,6 +67,18 @@ class SecurityManager:
         f = Fernet(self._key)
         return f.decrypt(ciphertext.encode()).decode()
 
+    def encrypt_bytes(self, plaintext: bytes) -> bytes:
+        if not self._key:
+            raise ValueError("未解锁，请先输入主密码")
+        f = Fernet(self._key)
+        return f.encrypt(plaintext)
+
+    def decrypt_bytes(self, ciphertext: bytes) -> bytes:
+        if not self._key:
+            raise ValueError("未解锁，请先输入主密码")
+        f = Fernet(self._key)
+        return f.decrypt(ciphertext)
+
     def verify_master_password(self, master_password: str) -> bool:
         try:
             test_key = self._derive_key(master_password)
