@@ -1,10 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
+rclone_exe = os.path.join(SPECPATH, 'rclone.exe')
+binaries = []
+if os.path.exists(rclone_exe):
+    binaries.append((rclone_exe, '.'))
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=[],
     hiddenimports=[
         'tkinterdnd2',
@@ -30,7 +35,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    upx_exclude=['rclone.exe'],
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,

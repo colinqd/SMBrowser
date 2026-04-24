@@ -16,11 +16,15 @@ def format_speed(bytes_per_sec):
 
 
 class ProgressFileWrapper:
-    def __init__(self, file_obj, total_size, filename, on_log):
+    def __init__(self, file_obj, total_size, filename, on_log,
+                 manager=None, task_id=None, item=None):
         self.file_obj = file_obj
         self.total_size = total_size
         self.filename = filename
         self.on_log = on_log
+        self.manager = manager
+        self.task_id = task_id
+        self.item = item
         self.bytes_read = 0
         self.last_reported_percent = -1
         self.start_time = time.time()
@@ -35,6 +39,8 @@ class ProgressFileWrapper:
                 speed = self.bytes_read / elapsed if elapsed > 0 else 0
                 speed_str = format_speed(speed)
                 self.on_log(f"正在上传: {self.filename} - {percent}% ({speed_str})")
+                if self.manager and self.task_id and self.item:
+                    self.manager.update_task_progress(self.task_id, self.item, percent / 100.0, speed_str)
                 self.last_reported_percent = percent
         return data
 
@@ -43,12 +49,16 @@ class ProgressFileWrapper:
 
 
 class ProgressWriteFileWrapper:
-    def __init__(self, file_obj, total_size, filename, on_log, start_offset=0):
+    def __init__(self, file_obj, total_size, filename, on_log, start_offset=0,
+                 manager=None, task_id=None, item=None):
         self.file_obj = file_obj
         self.total_size = total_size
         self.filename = filename
         self.on_log = on_log
         self.start_offset = start_offset
+        self.manager = manager
+        self.task_id = task_id
+        self.item = item
         self.bytes_written = 0
         self.last_reported_percent = -1
         self.start_time = time.time()
@@ -64,6 +74,8 @@ class ProgressWriteFileWrapper:
                 speed = self.bytes_written / elapsed if elapsed > 0 else 0
                 speed_str = format_speed(speed)
                 self.on_log(f"正在下载: {self.filename} - {percent}% ({speed_str})")
+                if self.manager and self.task_id and self.item:
+                    self.manager.update_task_progress(self.task_id, self.item, percent / 100.0, speed_str)
                 self.last_reported_percent = percent
 
     def close(self):
@@ -84,41 +96,63 @@ class FileOperations:
 
     def upload_files_async(
         self,
-        local_files: List[Tuple[str, str]],
+        local_files: List[Tuple[str, str, bool]],
         remote_base: str,
         on_progress: Callable[[str, int, int], None],
         on_complete: Callable[[int, int], None],
         on_error: Callable[[str, str], None],
-        on_log: Callable[[str], None]
+        on_log: Callable[[str], None],
+        manager=None,
+        task_id=None,
     ):
         def upload_thread():
             success_count = 0
             total_files = len(local_files)
 
-            for i, (filename, local_path) in enumerate(local_files):
+            task = manager.get_task(task_id) if manager and task_id else None
+            items = task.items if task else []
+
+            for i, (filename, local_path, is_dir) in enumerate(local_files):
+                item = items[i] if task and i < len(items) else None
                 on_progress(filename, i + 1, total_files)
 
                 try:
-                    if os.path.isfile(local_path):
+                    if not is_dir:
                         remote_path = self._normalize_remote_path(
                             remote_base.rstrip("/") + "/" + filename
                         )
-                        
-                        if self._upload_file_with_retry(local_path, remote_path, on_log):
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "running")
+
+                        if self._upload_file_with_retry(local_path, remote_path, on_log, manager, task_id, item):
                             success_count += 1
                             on_log(f"上传成功: {filename}")
-                        
-                    elif os.path.isdir(local_path):
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "上传失败")
+
+                    else:
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "running")
                         self._upload_directory_recursive(local_path, remote_base, on_log)
                         success_count += 1
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "completed")
+
                 except Exception as e:
                     on_error(filename, str(e))
+                    if item and manager:
+                        manager.update_task_status(task_id, item, "failed", str(e))
 
             on_complete(success_count, total_files)
 
         threading.Thread(target=upload_thread, daemon=True).start()
 
-    def _upload_file_with_retry(self, local_path: str, remote_path: str, on_log: Callable[[str], None]) -> bool:
+    def _upload_file_with_retry(self, local_path: str, remote_path: str,
+                                 on_log: Callable[[str], None],
+                                 manager=None, task_id=None, item=None) -> bool:
         local_file_size = os.path.getsize(local_path)
         filename = os.path.basename(local_path)
         
@@ -136,7 +170,8 @@ class FileOperations:
                 
                 on_log(f"开始上传: {filename} ({local_file_size} 字节)")
                 with open(local_path, "rb") as f:
-                    progress_file = ProgressFileWrapper(f, local_file_size, filename, on_log)
+                    progress_file = ProgressFileWrapper(f, local_file_size, filename, on_log,
+                                                        manager, task_id, item)
                     self.conn_manager.store_file(
                         self.conn_manager.current_share, remote_path, progress_file
                     )
@@ -157,7 +192,8 @@ class FileOperations:
         
         return False
 
-    def _upload_directory_recursive(self, local_dir: str, remote_base: str, on_log: Callable[[str], None]):
+    def _upload_directory_recursive(self, local_dir: str, remote_base: str,
+                                     on_log: Callable[[str], None]):
         dir_name = os.path.basename(local_dir)
         remote_dir = self._normalize_remote_path(remote_base.rstrip("/") + "/" + dir_name)
 
@@ -185,31 +221,53 @@ class FileOperations:
         on_progress: Callable[[str, int, int], None],
         on_complete: Callable[[int, int], None],
         on_error: Callable[[str, str], None],
-        on_log: Callable[[str], None]
+        on_log: Callable[[str], None],
+        manager=None,
+        task_id=None,
     ):
         def download_thread():
             success_count = 0
             total_files = len(remote_files)
 
+            task = manager.get_task(task_id) if manager and task_id else None
+            items = task.items if task else []
+
             for i, (filename, remote_path, local_path, is_dir) in enumerate(remote_files):
+                item = items[i] if task and i < len(items) else None
                 on_progress(filename, i + 1, total_files)
 
                 try:
                     if not is_dir:
-                        if self._download_file_with_retry(remote_path, local_path, on_log):
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "running")
+                        if self._download_file_with_retry(remote_path, local_path, on_log, manager, task_id, item):
                             success_count += 1
                             on_log(f"下载成功: {filename}")
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "下载失败")
                     else:
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "running")
                         self._download_directory_recursive(remote_path, local_path, on_log)
                         success_count += 1
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "completed")
+
                 except Exception as e:
                     on_error(filename, str(e))
+                    if item and manager:
+                        manager.update_task_status(task_id, item, "failed", str(e))
 
             on_complete(success_count, total_files)
 
         threading.Thread(target=download_thread, daemon=True).start()
 
-    def _download_file_with_retry(self, remote_path: str, local_path: str, on_log: Callable[[str], None]) -> bool:
+    def _download_file_with_retry(self, remote_path: str, local_path: str,
+                                   on_log: Callable[[str], None],
+                                   manager=None, task_id=None, item=None) -> bool:
         remote_path_normalized = self._normalize_remote_path(remote_path)
         filename = os.path.basename(local_path)
         
@@ -233,7 +291,8 @@ class FileOperations:
                     if local_size > 0 and local_size < file_size:
                         on_log(f"断点续传: {filename} (从 {local_size} 字节开始)")
                         with open(local_path, "ab") as f:
-                            progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log, local_size)
+                            progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log, local_size,
+                                                                      manager, task_id, item)
                             self.conn_manager.retrieve_file(
                                 self.conn_manager.current_share, remote_path_normalized, progress_file
                             )
@@ -242,7 +301,8 @@ class FileOperations:
                 
                 on_log(f"开始下载: {filename} ({file_size} 字节)")
                 with open(local_path, "wb") as f:
-                    progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log)
+                    progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log,
+                                                              manager=manager, task_id=task_id, item=item)
                     self.conn_manager.retrieve_file(
                         self.conn_manager.current_share, remote_path_normalized, progress_file
                     )
@@ -263,7 +323,8 @@ class FileOperations:
         
         return False
 
-    def _download_directory_recursive(self, remote_dir: str, local_base: str, on_log: Callable[[str], None]):
+    def _download_directory_recursive(self, remote_dir: str, local_base: str,
+                                       on_log: Callable[[str], None]):
         if not os.path.exists(local_base):
             os.makedirs(local_base)
 

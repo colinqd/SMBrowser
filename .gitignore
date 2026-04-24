@@ -59,3 +59,12 @@ smb_config.dat
 .smb_salt
 smb_config.json
 smb_config.json.bak
+
+# rclone
+rclone.exe
+rclone.zip
+rclone_new.zip
+rclone_dl.zip
+rclone_copy.zip
+rclone_temp/
+config/rclone.conf

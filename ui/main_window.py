@@ -11,6 +11,8 @@ from config.settings import Settings
 from config.security import SecurityManager
 from core.connection import SMBConnectionManager
 from core.file_ops import FileOperations
+from core.rclone_wrapper import RcloneWrapper, RcloneConfigManager, get_rclone_path
+from core.rclone_ops import RcloneFileOperations
 from ui.dialogs.connect_dialog import ConnectDialog
 from ui.dialogs.master_password_dialog import MasterPasswordDialog
 from ui.dialogs.change_password_dialog import ChangePasswordDialog
@@ -36,6 +38,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.conn_manager = SMBConnectionManager()
         self.file_ops = FileOperations(self.conn_manager)
 
+        self._init_rclone()
+
         self.remote_path: str = "/"
         self.local_path: str = os.path.expanduser("~")
         self.servers: Dict = Settings.load_servers()
@@ -55,6 +59,9 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.process_tasks()
 
+        if hasattr(self, 'log_message_init'):
+            self.log_message(self.log_message_init)
+
         if DND_SUPPORT:
             self.setup_drag_drop()
 
@@ -62,6 +69,26 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         self.update_remote_sort_indicator()
 
         self._check_master_password()
+
+    def _init_rclone(self):
+        self.rclone_available = False
+        self.rclone_ops: Optional[RcloneFileOperations] = None
+        self.use_rclone = False
+
+        try:
+            rclone_path = get_rclone_path()
+            self.rclone_wrapper = RcloneWrapper(rclone_path)
+            config_path = self.rclone_wrapper._get_config_path()
+            self.rclone_config_mgr = RcloneConfigManager(config_path)
+
+            if self.rclone_wrapper.is_available():
+                self.rclone_available = True
+                self.rclone_ops = RcloneFileOperations(self.rclone_wrapper, self.rclone_config_mgr)
+                self.log_message_init = "rclone 可用，已启用高性能传输引擎"
+            else:
+                self.log_message_init = "rclone 不可用，使用 pysmb 传输引擎"
+        except Exception as e:
+            self.log_message_init = f"rclone 初始化失败: {e}，使用 pysmb 传输引擎"
 
     def setup_style(self):
         style = ttk.Style()
@@ -117,6 +144,8 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         view_menu = Menu(menubar, tearoff=0)
         view_menu.add_command(label="刷新", command=self.refresh_all, accelerator="F5")
+        view_menu.add_separator()
+        view_menu.add_command(label="显示传输窗口", command=self.show_transfer_window, accelerator="Ctrl+T")
         menubar.add_cascade(label="查看", menu=view_menu)
 
         settings_menu = Menu(menubar, tearoff=0)
@@ -132,6 +161,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         self.bind("<F5>", lambda e: self.refresh_all())
         self.bind("<Control-n>", lambda e: self.show_connect_dialog())
+        self.bind("<Control-t>", lambda e: self.show_transfer_window())
 
     def create_toolbar(self):
         toolbar = ttk.Frame(self)
@@ -140,16 +170,22 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         ttk.Button(toolbar, text="新建", command=self.create_folder).pack(side="left", padx=2)
         ttk.Button(toolbar, text="上传", command=self.upload_from_local).pack(side="left", padx=2)
         ttk.Button(toolbar, text="下载", command=self.download_to_local).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", padx=5, fill="y")
         ttk.Button(toolbar, text="删除", command=self.delete_remote_items).pack(side="left", padx=2)
-
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
-
         ttk.Button(toolbar, text="刷新", command=self.refresh_all).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
+        ttk.Button(toolbar, text="传输窗口", command=self.show_transfer_window).pack(side="left", padx=2)
 
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=5, pady=3)
 
         self.conn_status_label = ttk.Label(toolbar, text="未连接", foreground="red")
         self.conn_status_label.pack(side="right", padx=10)
+
+    def show_transfer_window(self):
+        from ui.dialogs.transfer_progress import get_transfer_manager
+        manager = get_transfer_manager()
+        manager.show_window(self)
 
     def create_path_bars(self):
         path_frame = ttk.Frame(self)
@@ -1155,6 +1191,22 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             self.update_status("连接成功")
             self.log_message("服务器连接成功")
 
+            if self.rclone_available and self.rclone_ops:
+                try:
+                    remote_name = f"smb_{server_ip.replace('.', '_')}"
+                    self.rclone_ops.setup_remote(
+                        name=remote_name,
+                        host=server_ip,
+                        username=username,
+                        password=password,
+                        port=int(port) if port.isdigit() else 445,
+                    )
+                    self.use_rclone = True
+                    self.log_message(f"rclone 远程配置已创建: {remote_name}")
+                except Exception as e:
+                    self.use_rclone = False
+                    self.log_message(f"rclone 配置失败，使用 pysmb: {e}")
+
             self.init_remote_browser()
             
             if share_name_arg and share_name_arg in self.conn_manager.available_shares:
@@ -1181,6 +1233,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
     def disconnect(self):
         self.conn_manager.disconnect()
+        self.use_rclone = False
 
         self.update_connection_status(False)
         self.update_status("已断开连接")
@@ -1240,12 +1293,27 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             item = self.local_file_list.item(item_id)
             filename = item["text"].strip()
             local_path = os.path.join(self.local_path, filename)
+            tags = item.get("tags", [])
+            is_dir = "dir" in tags
 
             if os.path.exists(local_path):
-                files_to_upload.append((filename, local_path))
+                files_to_upload.append((filename, local_path, is_dir))
 
         if not files_to_upload:
             return
+
+        from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
+        manager = get_transfer_manager()
+        manager.show_window(self)
+
+        # 创建任务项
+        task_items = []
+        for filename, local_path, is_dir in files_to_upload:
+            remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+            item = TransferItem(filename, local_path, remote_path, True, is_dir)
+            task_items.append(item)
+        task = manager.create_task(task_items)
+        task_id = task.task_id
 
         def on_progress(filename, current, total):
             self.update_status(f"上传: {filename} ({current}/{total})")
@@ -1253,16 +1321,24 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         def on_complete(success, total):
             self.update_status("上传完成")
             self.log_message(f"上传完成: {success}/{total}")
-            messagebox.showinfo("完成", f"成功上传 {success} 个文件")
+            manager.complete_task(task_id)
             self.load_remote_files()
 
         def on_error(filename, error):
             self.log_message(f"上传失败[{filename}]: {error}")
 
-        self.file_ops.upload_files_async(
-            files_to_upload, self.remote_path,
-            on_progress, on_complete, on_error, self.log_message
-        )
+        if self.use_rclone and self.rclone_ops:
+            self.rclone_ops.upload_files_async(
+                files_to_upload, self.remote_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
+        else:
+            self.file_ops.upload_files_async(
+                files_to_upload, self.remote_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
 
     def upload_files_by_path(self, file_paths):
         if not self.conn_manager.conn or not self.conn_manager.current_share:
@@ -1271,7 +1347,21 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         files_to_upload = []
         for path in file_paths:
             filename = os.path.basename(path)
-            files_to_upload.append((filename, path))
+            is_dir = os.path.isdir(path)
+            files_to_upload.append((filename, path, is_dir))
+
+        from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
+        manager = get_transfer_manager()
+        manager.show_window(self)
+
+        # 创建任务项
+        task_items = []
+        for filename, local_path, is_dir in files_to_upload:
+            remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
+            item = TransferItem(filename, local_path, remote_path, True, is_dir)
+            task_items.append(item)
+        task = manager.create_task(task_items)
+        task_id = task.task_id
 
         def on_progress(filename, current, total):
             self.update_status(f"上传: {filename} ({current}/{total})")
@@ -1279,15 +1369,24 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         def on_complete(success, total):
             self.update_status("上传完成")
             self.log_message(f"上传完成: {success}/{total}")
+            manager.complete_task(task_id)
             self.load_remote_files()
 
         def on_error(filename, error):
             self.log_message(f"上传失败[{filename}]: {error}")
 
-        self.file_ops.upload_files_async(
-            files_to_upload, self.remote_path,
-            on_progress, on_complete, on_error, self.log_message
-        )
+        if self.use_rclone and self.rclone_ops:
+            self.rclone_ops.upload_files_async(
+                files_to_upload, self.remote_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
+        else:
+            self.file_ops.upload_files_async(
+                files_to_upload, self.remote_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
 
     def download_to_local(self):
         selected_items = self.remote_file_list.selection()
@@ -1313,22 +1412,42 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         if not files_to_download:
             return
 
+        from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
+        manager = get_transfer_manager()
+        manager.show_window(self)
+
+        # 创建任务项
+        task_items = []
+        for filename, remote_path, local_path, is_dir in files_to_download:
+            item = TransferItem(filename, remote_path, local_path, False, is_dir)
+            task_items.append(item)
+        task = manager.create_task(task_items)
+        task_id = task.task_id
+
         def on_progress(filename, current, total):
             self.update_status(f"下载: {filename} ({current}/{total})")
 
         def on_complete(success, total):
             self.update_status("下载完成")
             self.log_message(f"下载完成: {success}/{total}")
-            messagebox.showinfo("完成", f"成功下载 {success} 个文件")
+            manager.complete_task(task_id)
             self.load_local_files(self.local_path)
 
         def on_error(filename, error):
             self.log_message(f"下载失败[{filename}]: {error}")
 
-        self.file_ops.download_files_async(
-            files_to_download, self.local_path,
-            on_progress, on_complete, on_error, self.log_message
-        )
+        if self.use_rclone and self.rclone_ops:
+            self.rclone_ops.download_files_async(
+                files_to_download, self.local_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
+        else:
+            self.file_ops.download_files_async(
+                files_to_download, self.local_path,
+                on_progress, on_complete, on_error, self.log_message,
+                manager, task_id
+            )
 
     def delete_local_items(self):
         selected_items = self.local_file_list.selection()
