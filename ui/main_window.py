@@ -1288,7 +1288,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             messagebox.showwarning("提示", "请先连接到服务器")
             return
 
-        files_to_upload = []
+        raw_files = []
         for item_id in selected_items:
             item = self.local_file_list.item(item_id)
             filename = item["text"].strip()
@@ -1297,21 +1297,42 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             is_dir = "dir" in tags
 
             if os.path.exists(local_path):
-                files_to_upload.append((filename, local_path, is_dir))
+                raw_files.append((filename, local_path, is_dir))
 
-        if not files_to_upload:
+        if not raw_files:
             return
 
         from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
         manager = get_transfer_manager()
         manager.show_window(self)
 
-        # 创建任务项
+        expanded_files = []
         task_items = []
-        for filename, local_path, is_dir in files_to_upload:
-            remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
-            item = TransferItem(filename, local_path, remote_path, True, is_dir)
-            task_items.append(item)
+        for filename, local_path, is_dir in raw_files:
+            if is_dir:
+                dir_item = TransferItem(filename, local_path,
+                                        os.path.join(self.remote_path, filename).replace("\\", "/"),
+                                        True, True)
+                task_items.append(dir_item)
+                expanded_files.append((filename, local_path, True))
+
+                sub_items = self.file_ops.enumerate_local_dir(local_path)
+                for rel_path, full_path, sub_is_dir in sub_items:
+                    remote_rel = os.path.join(filename, rel_path).replace("\\", "/")
+                    sub_item = TransferItem(
+                        rel_path, full_path,
+                        os.path.join(self.remote_path, remote_rel).replace("\\", "/"),
+                        True, sub_is_dir
+                    )
+                    task_items.append(sub_item)
+                    expanded_files.append((remote_rel, full_path, sub_is_dir))
+            else:
+                item = TransferItem(filename, local_path,
+                                    os.path.join(self.remote_path, filename).replace("\\", "/"),
+                                    True, False)
+                task_items.append(item)
+                expanded_files.append((filename, local_path, False))
+
         task = manager.create_task(task_items)
         task_id = task.task_id
 
@@ -1320,22 +1341,21 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         def on_complete(success, total):
             self.update_status("上传完成")
-            self.log_message(f"上传完成: {success}/{total}")
             manager.complete_task(task_id)
             self.load_remote_files()
 
         def on_error(filename, error):
-            self.log_message(f"上传失败[{filename}]: {error}")
+            pass
 
         if self.use_rclone and self.rclone_ops:
             self.rclone_ops.upload_files_async(
-                files_to_upload, self.remote_path,
+                expanded_files, self.remote_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )
         else:
             self.file_ops.upload_files_async(
-                files_to_upload, self.remote_path,
+                expanded_files, self.remote_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )
@@ -1344,22 +1364,43 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
         if not self.conn_manager.conn or not self.conn_manager.current_share:
             return
 
-        files_to_upload = []
+        raw_files = []
         for path in file_paths:
             filename = os.path.basename(path)
             is_dir = os.path.isdir(path)
-            files_to_upload.append((filename, path, is_dir))
+            raw_files.append((filename, path, is_dir))
 
         from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
         manager = get_transfer_manager()
         manager.show_window(self)
 
-        # 创建任务项
+        expanded_files = []
         task_items = []
-        for filename, local_path, is_dir in files_to_upload:
-            remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
-            item = TransferItem(filename, local_path, remote_path, True, is_dir)
-            task_items.append(item)
+        for filename, local_path, is_dir in raw_files:
+            if is_dir:
+                dir_item = TransferItem(filename, local_path,
+                                        os.path.join(self.remote_path, filename).replace("\\", "/"),
+                                        True, True)
+                task_items.append(dir_item)
+                expanded_files.append((filename, local_path, True))
+
+                sub_items = self.file_ops.enumerate_local_dir(local_path)
+                for rel_path, full_path, sub_is_dir in sub_items:
+                    remote_rel = os.path.join(filename, rel_path).replace("\\", "/")
+                    sub_item = TransferItem(
+                        rel_path, full_path,
+                        os.path.join(self.remote_path, remote_rel).replace("\\", "/"),
+                        True, sub_is_dir
+                    )
+                    task_items.append(sub_item)
+                    expanded_files.append((remote_rel, full_path, sub_is_dir))
+            else:
+                item = TransferItem(filename, local_path,
+                                    os.path.join(self.remote_path, filename).replace("\\", "/"),
+                                    True, False)
+                task_items.append(item)
+                expanded_files.append((filename, local_path, False))
+
         task = manager.create_task(task_items)
         task_id = task.task_id
 
@@ -1368,22 +1409,21 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         def on_complete(success, total):
             self.update_status("上传完成")
-            self.log_message(f"上传完成: {success}/{total}")
             manager.complete_task(task_id)
             self.load_remote_files()
 
         def on_error(filename, error):
-            self.log_message(f"上传失败[{filename}]: {error}")
+            pass
 
         if self.use_rclone and self.rclone_ops:
             self.rclone_ops.upload_files_async(
-                files_to_upload, self.remote_path,
+                expanded_files, self.remote_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )
         else:
             self.file_ops.upload_files_async(
-                files_to_upload, self.remote_path,
+                expanded_files, self.remote_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )
@@ -1398,7 +1438,7 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
             messagebox.showwarning("提示", "请先连接到服务器")
             return
 
-        files_to_download = []
+        raw_files = []
         for item_id in selected_items:
             item = self.remote_file_list.item(item_id)
             filename = item["text"].strip()
@@ -1407,20 +1447,36 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
             remote_path = os.path.join(self.remote_path, filename).replace("\\", "/")
             local_path = os.path.join(self.local_path, filename)
-            files_to_download.append((filename, remote_path, local_path, is_dir))
+            raw_files.append((filename, remote_path, local_path, is_dir))
 
-        if not files_to_download:
+        if not raw_files:
             return
 
         from ui.dialogs.transfer_progress import get_transfer_manager, TransferItem
         manager = get_transfer_manager()
         manager.show_window(self)
 
-        # 创建任务项
+        expanded_files = []
         task_items = []
-        for filename, remote_path, local_path, is_dir in files_to_download:
-            item = TransferItem(filename, remote_path, local_path, False, is_dir)
-            task_items.append(item)
+        for filename, remote_path, local_path, is_dir in raw_files:
+            if is_dir:
+                dir_item = TransferItem(filename, remote_path, local_path, False, True)
+                task_items.append(dir_item)
+                expanded_files.append((filename, remote_path, local_path, True))
+
+                sub_items = self.file_ops.enumerate_remote_dir(remote_path, remote_path)
+                for rel_path, sub_remote_path, sub_is_dir in sub_items:
+                    # rel_path 现在是相对于 remote_path 的路径（如 "a/c.txt"）
+                    sub_name = rel_path
+                    sub_local_path = os.path.join(local_path, sub_name)
+                    sub_item = TransferItem(sub_name, sub_remote_path, sub_local_path, False, sub_is_dir)
+                    task_items.append(sub_item)
+                    expanded_files.append((sub_name, sub_remote_path, sub_local_path, sub_is_dir))
+            else:
+                item = TransferItem(filename, remote_path, local_path, False, False)
+                task_items.append(item)
+                expanded_files.append((filename, remote_path, local_path, False))
+
         task = manager.create_task(task_items)
         task_id = task.task_id
 
@@ -1429,22 +1485,21 @@ class SMBClientBrowser(TkinterDnD.Tk if DND_SUPPORT else tk.Tk):
 
         def on_complete(success, total):
             self.update_status("下载完成")
-            self.log_message(f"下载完成: {success}/{total}")
             manager.complete_task(task_id)
             self.load_local_files(self.local_path)
 
         def on_error(filename, error):
-            self.log_message(f"下载失败[{filename}]: {error}")
+            pass
 
         if self.use_rclone and self.rclone_ops:
             self.rclone_ops.download_files_async(
-                files_to_download, self.local_path,
+                expanded_files, self.local_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )
         else:
             self.file_ops.download_files_async(
-                files_to_download, self.local_path,
+                expanded_files, self.local_path,
                 on_progress, on_complete, on_error, self.log_message,
                 manager, task_id
             )

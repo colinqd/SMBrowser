@@ -53,7 +53,6 @@ class RcloneFileOperations:
 
             for i, (filename, local_path, is_dir) in enumerate(local_files):
                 if self._cancelled:
-                    on_log("上传已取消")
                     if manager and task_id:
                         for item in items:
                             if item.status == "pending":
@@ -64,24 +63,33 @@ class RcloneFileOperations:
                 on_progress(filename, i + 1, total_files)
 
                 try:
-                    if item and manager:
-                        manager.update_task_status(task_id, item, "running")
-
                     if is_dir:
                         remote_dir = f"{self.remote_prefix}{remote_base_norm}/{filename}"
-                        ret = self._upload_directory(local_path, remote_dir, on_log, manager, task_id, item)
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "running")
+                        ret = self._upload_directory(local_path, remote_dir, manager, task_id, item)
+                        if ret:
+                            success_count += 1
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
                     else:
                         remote_file = f"{self.remote_prefix}{remote_base_norm}/{filename}"
-                        ret = self._upload_file(local_path, remote_file, on_log, manager, task_id, item)
-
-                    if ret:
-                        success_count += 1
                         if item and manager:
-                            manager.update_task_status(task_id, item, "completed")
-                    else:
-                        on_error(filename, "rclone 传输失败")
-                        if item and manager:
-                            manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
+                            local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                            if local_size > 0:
+                                manager.update_item_size(task_id, item, local_size)
+                            manager.update_task_status(task_id, item, "running")
+                        ret = self._upload_file(local_path, remote_file, manager, task_id, item)
+                        if ret:
+                            success_count += 1
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
                 except Exception as e:
                     on_error(filename, str(e))
                     if item and manager:
@@ -113,7 +121,6 @@ class RcloneFileOperations:
 
             for i, (filename, remote_path, local_path, is_dir) in enumerate(remote_files):
                 if self._cancelled:
-                    on_log("下载已取消")
                     if manager and task_id:
                         for item in items:
                             if item.status == "pending":
@@ -124,27 +131,33 @@ class RcloneFileOperations:
                 on_progress(filename, i + 1, total_files)
 
                 try:
-                    if item and manager:
-                        manager.update_task_status(task_id, item, "running")
-
                     remote_norm = remote_path.replace("\\", "/")
                     if not remote_norm.startswith("/"):
                         remote_norm = "/" + remote_norm
                     remote_full = f"{self.remote_prefix}{remote_norm}"
 
                     if is_dir:
-                        ret = self._download_directory(remote_full, local_path, on_log, manager, task_id, item)
-                    else:
-                        ret = self._download_file(remote_full, local_path, on_log, manager, task_id, item)
-
-                    if ret:
-                        success_count += 1
                         if item and manager:
-                            manager.update_task_status(task_id, item, "completed")
+                            manager.update_task_status(task_id, item, "running")
+                        ret = self._download_directory(remote_full, local_path, manager, task_id, item)
+                        if ret:
+                            success_count += 1
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
                     else:
-                        on_error(filename, "rclone 传输失败")
                         if item and manager:
-                            manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
+                            manager.update_task_status(task_id, item, "running")
+                        ret = self._download_file(remote_full, local_path, manager, task_id, item)
+                        if ret:
+                            success_count += 1
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "completed")
+                        else:
+                            if item and manager:
+                                manager.update_task_status(task_id, item, "failed", "rclone 传输失败")
                 except Exception as e:
                     on_error(filename, str(e))
                     if item and manager:
@@ -155,20 +168,24 @@ class RcloneFileOperations:
         threading.Thread(target=download_thread, daemon=True).start()
 
     def _upload_file(self, local_path: str, remote_path: str,
-                     on_log: Callable[[str], None],
                      manager=None, task_id=None, item=None) -> bool:
         filename = os.path.basename(local_path)
-        on_log(f"正在上传: {filename} (rclone)")
+
+        local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+        if manager and task_id and item and local_size > 0:
+            manager.update_item_size(task_id, item, local_size)
 
         def handle_stderr(line: str):
             progress = RcloneProgressParser.parse_line(line)
             if progress and progress.percentage > 0:
                 speed_str = progress.speed_human or ""
-                on_log(f"正在上传: {filename} - {progress.percentage:.0f}% ({speed_str})")
                 if manager and task_id and item:
-                    manager.update_task_progress(task_id, item, progress.percentage / 100.0, speed_str)
+                    manager.update_task_progress(
+                        task_id, item, progress.percentage / 100.0,
+                        speed_str, progress.bytes_transferred, progress.speed
+                    )
             elif line.strip() and "ERROR" in line.upper():
-                on_log(f"[rclone] {line}")
+                pass
 
         ret = self.rclone.execute(
             [
@@ -183,18 +200,11 @@ class RcloneFileOperations:
             on_error=handle_stderr,
         )
 
-        if ret == 0:
-            on_log(f"上传成功: {filename}")
-            return True
-        else:
-            on_log(f"上传失败 (退出码 {ret}): {filename}")
-            return False
+        return ret == 0
 
     def _download_file(self, remote_path: str, local_path: str,
-                       on_log: Callable[[str], None],
                        manager=None, task_id=None, item=None) -> bool:
         filename = os.path.basename(local_path)
-        on_log(f"正在下载: {filename} (rclone)")
 
         local_dir = os.path.dirname(local_path)
         if local_dir:
@@ -204,11 +214,13 @@ class RcloneFileOperations:
             progress = RcloneProgressParser.parse_line(line)
             if progress and progress.percentage > 0:
                 speed_str = progress.speed_human or ""
-                on_log(f"正在下载: {filename} - {progress.percentage:.0f}% ({speed_str})")
                 if manager and task_id and item:
-                    manager.update_task_progress(task_id, item, progress.percentage / 100.0, speed_str)
+                    manager.update_task_progress(
+                        task_id, item, progress.percentage / 100.0,
+                        speed_str, progress.bytes_transferred, progress.speed
+                    )
             elif line.strip() and "ERROR" in line.upper():
-                on_log(f"[rclone] {line}")
+                pass
 
         ret = self.rclone.execute(
             [
@@ -223,28 +235,23 @@ class RcloneFileOperations:
             on_error=handle_stderr,
         )
 
-        if ret == 0:
-            on_log(f"下载成功: {filename}")
-            return True
-        else:
-            on_log(f"下载失败 (退出码 {ret}): {filename}")
-            return False
+        return ret == 0
 
     def _upload_directory(self, local_dir: str, remote_dir: str,
-                          on_log: Callable[[str], None],
                           manager=None, task_id=None, item=None) -> bool:
         dirname = os.path.basename(local_dir)
-        on_log(f"正在上传目录: {dirname} (rclone)")
 
         def handle_stderr(line: str):
             progress = RcloneProgressParser.parse_line(line)
             if progress and progress.percentage > 0:
                 speed_str = progress.speed_human or ""
-                on_log(f"上传进度: {progress.files_transferred}/{progress.files_total} 文件 - {progress.percentage:.0f}% ({speed_str})")
                 if manager and task_id and item:
-                    manager.update_task_progress(task_id, item, progress.percentage / 100.0, speed_str)
+                    manager.update_task_progress(
+                        task_id, item, progress.percentage / 100.0,
+                        speed_str, progress.bytes_transferred, progress.speed
+                    )
             elif line.strip() and "ERROR" in line.upper():
-                on_log(f"[rclone] {line}")
+                pass
 
         ret = self.rclone.execute(
             [
@@ -259,18 +266,11 @@ class RcloneFileOperations:
             on_error=handle_stderr,
         )
 
-        if ret == 0:
-            on_log(f"目录上传成功: {dirname}")
-            return True
-        else:
-            on_log(f"目录上传失败 (退出码 {ret}): {dirname}")
-            return False
+        return ret == 0
 
     def _download_directory(self, remote_dir: str, local_dir: str,
-                            on_log: Callable[[str], None],
                             manager=None, task_id=None, item=None) -> bool:
         dirname = os.path.basename(local_dir)
-        on_log(f"正在下载目录: {dirname} (rclone)")
 
         os.makedirs(local_dir, exist_ok=True)
 
@@ -278,11 +278,13 @@ class RcloneFileOperations:
             progress = RcloneProgressParser.parse_line(line)
             if progress and progress.percentage > 0:
                 speed_str = progress.speed_human or ""
-                on_log(f"下载进度: {progress.files_transferred}/{progress.files_total} 文件 - {progress.percentage:.0f}% ({speed_str})")
                 if manager and task_id and item:
-                    manager.update_task_progress(task_id, item, progress.percentage / 100.0, speed_str)
+                    manager.update_task_progress(
+                        task_id, item, progress.percentage / 100.0,
+                        speed_str, progress.bytes_transferred, progress.speed
+                    )
             elif line.strip() and "ERROR" in line.upper():
-                on_log(f"[rclone] {line}")
+                pass
 
         ret = self.rclone.execute(
             [
@@ -297,12 +299,7 @@ class RcloneFileOperations:
             on_error=handle_stderr,
         )
 
-        if ret == 0:
-            on_log(f"目录下载成功: {dirname}")
-            return True
-        else:
-            on_log(f"目录下载失败 (退出码 {ret}): {dirname}")
-            return False
+        return ret == 0
 
     def cancel(self):
         self._cancelled = True

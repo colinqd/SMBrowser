@@ -16,32 +16,43 @@ def format_speed(bytes_per_sec):
 
 
 class ProgressFileWrapper:
-    def __init__(self, file_obj, total_size, filename, on_log,
+    CHUNK_SIZE = 65536
+
+    def __init__(self, file_obj, total_size, filename,
                  manager=None, task_id=None, item=None):
         self.file_obj = file_obj
         self.total_size = total_size
         self.filename = filename
-        self.on_log = on_log
         self.manager = manager
         self.task_id = task_id
         self.item = item
         self.bytes_read = 0
+        self.last_reported_time = 0
         self.last_reported_percent = -1
         self.start_time = time.time()
+        if manager and task_id and item:
+            manager.update_item_size(task_id, item, total_size)
 
     def read(self, size=-1):
+        if size < 0:
+            size = self.CHUNK_SIZE
         data = self.file_obj.read(size)
         self.bytes_read += len(data)
+        now = time.time()
         if self.total_size > 0:
             percent = int((self.bytes_read / self.total_size) * 100)
-            if percent != self.last_reported_percent and percent % 2 == 0:
-                elapsed = time.time() - self.start_time
+            time_elapsed = now - self.last_reported_time
+            if (percent != self.last_reported_percent and time_elapsed >= 0.15) or percent >= 100:
+                elapsed = now - self.start_time
                 speed = self.bytes_read / elapsed if elapsed > 0 else 0
                 speed_str = format_speed(speed)
-                self.on_log(f"正在上传: {self.filename} - {percent}% ({speed_str})")
                 if self.manager and self.task_id and self.item:
-                    self.manager.update_task_progress(self.task_id, self.item, percent / 100.0, speed_str)
+                    self.manager.update_task_progress(
+                        self.task_id, self.item, percent / 100.0,
+                        speed_str, self.bytes_read, speed
+                    )
                 self.last_reported_percent = percent
+                self.last_reported_time = now
         return data
 
     def close(self):
@@ -49,34 +60,41 @@ class ProgressFileWrapper:
 
 
 class ProgressWriteFileWrapper:
-    def __init__(self, file_obj, total_size, filename, on_log, start_offset=0,
+    def __init__(self, file_obj, total_size, filename, start_offset=0,
                  manager=None, task_id=None, item=None):
         self.file_obj = file_obj
         self.total_size = total_size
         self.filename = filename
-        self.on_log = on_log
         self.start_offset = start_offset
         self.manager = manager
         self.task_id = task_id
         self.item = item
         self.bytes_written = 0
+        self.last_reported_time = 0
         self.last_reported_percent = -1
         self.start_time = time.time()
+        if manager and task_id and item:
+            manager.update_item_size(task_id, item, total_size)
 
     def write(self, data):
         self.file_obj.write(data)
         self.bytes_written += len(data)
+        now = time.time()
         if self.total_size > 0:
             total = self.start_offset + self.bytes_written
             percent = int((total / self.total_size) * 100)
-            if percent != self.last_reported_percent and percent % 2 == 0:
-                elapsed = time.time() - self.start_time
+            time_elapsed = now - self.last_reported_time
+            if (percent != self.last_reported_percent and time_elapsed >= 0.15) or percent >= 100:
+                elapsed = now - self.start_time
                 speed = self.bytes_written / elapsed if elapsed > 0 else 0
                 speed_str = format_speed(speed)
-                self.on_log(f"正在下载: {self.filename} - {percent}% ({speed_str})")
                 if self.manager and self.task_id and self.item:
-                    self.manager.update_task_progress(self.task_id, self.item, percent / 100.0, speed_str)
+                    self.manager.update_task_progress(
+                        self.task_id, self.item, percent / 100.0,
+                        speed_str, total, speed
+                    )
                 self.last_reported_percent = percent
+                self.last_reported_time = now
 
     def close(self):
         self.file_obj.close()
@@ -93,6 +111,51 @@ class FileOperations:
         if not path.startswith("/"):
             path = "/" + path
         return path
+
+    def enumerate_local_dir(self, local_dir: str, base_dir: str = None) -> List[Tuple[str, str, bool]]:
+        if base_dir is None:
+            base_dir = local_dir
+        result = []
+        try:
+            for entry in os.listdir(local_dir):
+                full_path = os.path.join(local_dir, entry)
+                rel_path = os.path.relpath(full_path, base_dir).replace("\\", "/")
+                if os.path.isdir(full_path):
+                    result.append((rel_path, full_path, True))
+                    result.extend(self.enumerate_local_dir(full_path, base_dir))
+                else:
+                    result.append((rel_path, full_path, False))
+        except Exception:
+            pass
+        return result
+
+    def enumerate_remote_dir(self, remote_dir: str, base_dir: str = None) -> List[Tuple[str, str, bool]]:
+        if base_dir is None:
+            base_dir = remote_dir
+        result = []
+        try:
+            remote_dir_norm = self._normalize_remote_path(remote_dir)
+            items = self.conn_manager.list_path(self.conn_manager.current_share, remote_dir_norm)
+            for item in items:
+                if item.filename in [".", ".."]:
+                    continue
+                # 计算相对于 base_dir 的路径，而不是包含 base_dir 的完整路径
+                # 例如：base_dir="/a/v", remote_dir="/a/v" -> rel_path="c.txt"
+                # 例如：base_dir="/a/v", remote_dir="/a/v/sub" -> rel_path="sub/c.txt"
+                if remote_dir == base_dir or remote_dir == base_dir.rstrip("/"):
+                    rel_path = item.filename
+                else:
+                    rel_dir = remote_dir[len(base_dir.rstrip("/")):].lstrip("/")
+                    rel_path = (rel_dir + "/" + item.filename) if rel_dir else item.filename
+                remote_path = self._normalize_remote_path(remote_dir + "/" + item.filename)
+                if item.isDirectory:
+                    result.append((rel_path, remote_path, True))
+                    result.extend(self.enumerate_remote_dir(remote_path, base_dir))
+                else:
+                    result.append((rel_path, remote_path, False))
+        except Exception:
+            pass
+        return result
 
     def upload_files_async(
         self,
@@ -117,29 +180,46 @@ class FileOperations:
                 on_progress(filename, i + 1, total_files)
 
                 try:
-                    if not is_dir:
+                    if is_dir:
+                        remote_dir = self._normalize_remote_path(
+                            remote_base.rstrip("/") + "/" + filename
+                        )
+                        try:
+                            self.conn_manager.create_directory(
+                                self.conn_manager.current_share, remote_dir
+                            )
+                        except Exception:
+                            pass
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "completed")
+                        success_count += 1
+                    else:
                         remote_path = self._normalize_remote_path(
                             remote_base.rstrip("/") + "/" + filename
                         )
+                        remote_dir = self._normalize_remote_path(
+                            "/".join(remote_path.split("/")[:-1])
+                        )
+                        try:
+                            self.conn_manager.create_directory(
+                                self.conn_manager.current_share, remote_dir
+                            )
+                        except Exception:
+                            pass
+
                         if item and manager:
+                            local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                            if local_size > 0:
+                                manager.update_item_size(task_id, item, local_size)
                             manager.update_task_status(task_id, item, "running")
 
-                        if self._upload_file_with_retry(local_path, remote_path, on_log, manager, task_id, item):
+                        if self._upload_file_with_retry(local_path, remote_path, manager, task_id, item):
                             success_count += 1
-                            on_log(f"上传成功: {filename}")
                             if item and manager:
                                 manager.update_task_status(task_id, item, "completed")
                         else:
                             if item and manager:
                                 manager.update_task_status(task_id, item, "failed", "上传失败")
-
-                    else:
-                        if item and manager:
-                            manager.update_task_status(task_id, item, "running")
-                        self._upload_directory_recursive(local_path, remote_base, on_log)
-                        success_count += 1
-                        if item and manager:
-                            manager.update_task_status(task_id, item, "completed")
 
                 except Exception as e:
                     on_error(filename, str(e))
@@ -151,68 +231,41 @@ class FileOperations:
         threading.Thread(target=upload_thread, daemon=True).start()
 
     def _upload_file_with_retry(self, local_path: str, remote_path: str,
-                                 on_log: Callable[[str], None],
                                  manager=None, task_id=None, item=None) -> bool:
         local_file_size = os.path.getsize(local_path)
         filename = os.path.basename(local_path)
-        
+
         for attempt in range(self._retry_count):
             try:
                 remote_file_info = self.conn_manager.get_file_info(
                     self.conn_manager.current_share, remote_path
                 )
-                
+
                 if remote_file_info and not remote_file_info['is_directory']:
                     if remote_file_info['size'] >= local_file_size:
-                        on_log(f"跳过（已存在且完整）: {filename}")
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "completed")
                         return True
-                    on_log(f"文件已存在但大小不同，将覆盖: {filename}")
-                
-                on_log(f"开始上传: {filename} ({local_file_size} 字节)")
+
                 with open(local_path, "rb") as f:
-                    progress_file = ProgressFileWrapper(f, local_file_size, filename, on_log,
+                    progress_file = ProgressFileWrapper(f, local_file_size, filename,
                                                         manager, task_id, item)
                     self.conn_manager.store_file(
                         self.conn_manager.current_share, remote_path, progress_file
                     )
-                on_log(f"上传完成: {filename} - 100%")
                 return True
-                
+
             except Exception as e:
                 error_msg = str(e)
                 if "unpack requires a buffer" in error_msg:
-                    on_log(f"服务器协议错误，尝试重试: {filename}")
                     time.sleep(self._retry_delay)
                     continue
                 if attempt < self._retry_count - 1:
-                    on_log(f"上传失败，重试中 ({attempt + 1}/{self._retry_count}): {filename}")
                     time.sleep(self._retry_delay)
                 else:
                     raise
-        
+
         return False
-
-    def _upload_directory_recursive(self, local_dir: str, remote_base: str,
-                                     on_log: Callable[[str], None]):
-        dir_name = os.path.basename(local_dir)
-        remote_dir = self._normalize_remote_path(remote_base.rstrip("/") + "/" + dir_name)
-
-        try:
-            self.conn_manager.create_directory(self.conn_manager.current_share, remote_dir)
-        except:
-            pass
-
-        for item in os.listdir(local_dir):
-            local_path = os.path.join(local_dir, item)
-            remote_path = self._normalize_remote_path(remote_dir + "/" + item)
-
-            if os.path.isdir(local_path):
-                self._upload_directory_recursive(local_path, remote_dir, on_log)
-            else:
-                try:
-                    self._upload_file_with_retry(local_path, remote_path, on_log)
-                except Exception as e:
-                    on_log(f"上传失败: {item} - {str(e)}")
 
     def download_files_async(
         self,
@@ -237,24 +290,30 @@ class FileOperations:
                 on_progress(filename, i + 1, total_files)
 
                 try:
-                    if not is_dir:
+                    if is_dir:
+                        # 只创建相对于 local_base 的目录层级，不创建 local_base 之上的目录
+                        # local_path 格式应该是 local_base/dir_name 或 local_base/dir_name/subdir
+                        # 不应该创建 local_base 之上的任何目录
+                        os.makedirs(local_path, exist_ok=True)
+                        if item and manager:
+                            manager.update_task_status(task_id, item, "completed")
+                        success_count += 1
+                    else:
+                        # 对于文件，只创建 local_base 之下的目录结构
+                        local_parent_dir = os.path.dirname(local_path)
+                        if local_parent_dir:
+                            # 确保只创建 local_base 之下的目录
+                            if not os.path.exists(local_parent_dir):
+                                os.makedirs(local_parent_dir, exist_ok=True)
                         if item and manager:
                             manager.update_task_status(task_id, item, "running")
-                        if self._download_file_with_retry(remote_path, local_path, on_log, manager, task_id, item):
+                        if self._download_file_with_retry(remote_path, local_path, manager, task_id, item):
                             success_count += 1
-                            on_log(f"下载成功: {filename}")
                             if item and manager:
                                 manager.update_task_status(task_id, item, "completed")
                         else:
                             if item and manager:
                                 manager.update_task_status(task_id, item, "failed", "下载失败")
-                    else:
-                        if item and manager:
-                            manager.update_task_status(task_id, item, "running")
-                        self._download_directory_recursive(remote_path, local_path, on_log)
-                        success_count += 1
-                        if item and manager:
-                            manager.update_task_status(task_id, item, "completed")
 
                 except Exception as e:
                     on_error(filename, str(e))
@@ -266,87 +325,60 @@ class FileOperations:
         threading.Thread(target=download_thread, daemon=True).start()
 
     def _download_file_with_retry(self, remote_path: str, local_path: str,
-                                   on_log: Callable[[str], None],
                                    manager=None, task_id=None, item=None) -> bool:
         remote_path_normalized = self._normalize_remote_path(remote_path)
         filename = os.path.basename(local_path)
-        
+
         for attempt in range(self._retry_count):
             try:
                 remote_file_info = self.conn_manager.get_file_info(
                     self.conn_manager.current_share, remote_path_normalized
                 )
-                
+
                 if not remote_file_info:
-                    on_log(f"无法获取文件信息: {filename}")
                     return False
-                
+
                 file_size = remote_file_info['size']
-                
+
                 if os.path.exists(local_path):
                     local_size = os.path.getsize(local_path)
                     if local_size >= file_size:
-                        on_log(f"跳过（已存在且完整）: {filename}")
+                        if item and manager:
+                            manager.update_item_size(task_id, item, file_size)
+                            manager.update_task_status(task_id, item, "completed")
                         return True
                     if local_size > 0 and local_size < file_size:
-                        on_log(f"断点续传: {filename} (从 {local_size} 字节开始)")
                         with open(local_path, "ab") as f:
-                            progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log, local_size,
-                                                                      manager, task_id, item)
+                            progress_file = ProgressWriteFileWrapper(
+                                f, file_size, filename, local_size,
+                                manager, task_id, item
+                            )
                             self.conn_manager.retrieve_file(
                                 self.conn_manager.current_share, remote_path_normalized, progress_file
                             )
-                        on_log(f"下载完成: {filename} - 100%")
                         return True
-                
-                on_log(f"开始下载: {filename} ({file_size} 字节)")
+
                 with open(local_path, "wb") as f:
-                    progress_file = ProgressWriteFileWrapper(f, file_size, filename, on_log,
-                                                              manager=manager, task_id=task_id, item=item)
+                    progress_file = ProgressWriteFileWrapper(
+                        f, file_size, filename,
+                        manager=manager, task_id=task_id, item=item
+                    )
                     self.conn_manager.retrieve_file(
                         self.conn_manager.current_share, remote_path_normalized, progress_file
                     )
-                on_log(f"下载完成: {filename} - 100%")
                 return True
-                
+
             except Exception as e:
                 error_msg = str(e)
                 if "unpack requires a buffer" in error_msg:
-                    on_log(f"服务器协议错误，尝试重试: {filename}")
                     time.sleep(self._retry_delay)
                     continue
                 if attempt < self._retry_count - 1:
-                    on_log(f"下载失败，重试中 ({attempt + 1}/{self._retry_count}): {filename}")
                     time.sleep(self._retry_delay)
                 else:
                     raise
-        
+
         return False
-
-    def _download_directory_recursive(self, remote_dir: str, local_base: str,
-                                       on_log: Callable[[str], None]):
-        if not os.path.exists(local_base):
-            os.makedirs(local_base)
-
-        try:
-            remote_dir_normalized = self._normalize_remote_path(remote_dir)
-            items = self.conn_manager.list_path(self.conn_manager.current_share, remote_dir_normalized)
-            for item in items:
-                if item.filename in [".", ".."]:
-                    continue
-
-                remote_path = self._normalize_remote_path(remote_dir + "/" + item.filename)
-                local_path = os.path.join(local_base, item.filename)
-
-                if item.isDirectory:
-                    self._download_directory_recursive(remote_path, local_path, on_log)
-                else:
-                    try:
-                        self._download_file_with_retry(remote_path, local_path, on_log)
-                    except Exception as e:
-                        on_log(f"下载失败: {item.filename} - {str(e)}")
-        except Exception as e:
-            on_log(f"下载目录失败: {remote_dir} - {str(e)}")
 
     def delete_remote_items_async(
         self,
